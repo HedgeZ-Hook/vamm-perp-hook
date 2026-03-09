@@ -4,5 +4,17 @@
       "name": "v1.15.0",
       "rev": "0844d7e1fc5e60d77b68e469bff60265f236c398"
     }
+  },
+  "lib/hookmate": {
+    "rev": "6c43b0ea438a09782c808a7508f94aaae912ad5f"
+  },
+  "lib/uniswap-hooks": {
+    "tag": {
+      "name": "v1.2.1",
+      "rev": "acbd604c409a827f7f98c9517236da860c4fca1a"
+    }
+  },
+  "lib/v4-periphery": {
+    "rev": "5da22e609fd78c01fb7ddf2a6abb1f2ec7dc2b87"
   }
 }
