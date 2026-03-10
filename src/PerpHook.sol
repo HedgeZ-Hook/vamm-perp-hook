@@ -14,8 +14,11 @@ import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/Pool
 contract PerpHook is BaseHook, Ownable {
     using PoolIdLibrary for PoolKey;
 
+    error UnauthorizedVammSwapper(address sender);
+
     PoolId public spotPoolId;
     PoolId public vammPoolId;
+    address public clearingHouse;
 
     event VammSwapAttempt(address indexed sender);
     event VammSwapExecuted(address indexed sender, BalanceDelta delta);
@@ -52,12 +55,17 @@ contract PerpHook is BaseHook, Ownable {
         vammPoolId = key.toId();
     }
 
+    function setClearingHouse(address clearingHouse_) external onlyOwner {
+        clearingHouse = clearingHouse_;
+    }
+
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata, bytes calldata)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         if (PoolId.unwrap(key.toId()) == PoolId.unwrap(vammPoolId)) {
+            if (clearingHouse != address(0) && sender != clearingHouse) revert UnauthorizedVammSwapper(sender);
             emit VammSwapAttempt(sender);
         }
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -88,11 +96,12 @@ contract PerpHook is BaseHook, Ownable {
         return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
-    function _beforeRemoveLiquidity(address sender, PoolKey calldata key, ModifyLiquidityParams calldata, bytes calldata)
-        internal
-        override
-        returns (bytes4)
-    {
+    function _beforeRemoveLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        bytes calldata
+    ) internal override returns (bytes4) {
         if (PoolId.unwrap(key.toId()) == PoolId.unwrap(spotPoolId)) {
             emit SpotLPRemovalRequested(sender);
         }
