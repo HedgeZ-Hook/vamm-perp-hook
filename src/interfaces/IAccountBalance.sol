@@ -34,10 +34,19 @@ interface IAccountBalance {
 
     function getActivePoolIds(address trader) external view returns (PoolId[] memory poolIds);
 
+    function getOwedRealizedPnl(address trader) external view returns (int256 pnl);
+
+    function getMarkPriceX18(PoolId poolId) external view returns (uint256 priceX18);
+
     function getTotalAbsPositionValue(address trader) external view returns (uint256 totalAbsPositionValue);
 
     function getMarginRequirementForLiquidation(address trader)
         external
         view
         returns (int256 marginRequirementForLiquidation);
+
+    function getLiquidatablePositionSize(address trader, PoolId poolId, int256 accountValue)
+        external
+        view
+        returns (int256 liquidatablePositionSize);
 }

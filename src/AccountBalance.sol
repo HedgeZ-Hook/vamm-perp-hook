@@ -13,6 +13,8 @@ contract AccountBalance is Ownable, IAccountBalance {
     error Unauthorized(address caller);
     error Int256Overflow();
 
+    uint256 internal constant MIN_PARTIAL_LIQUIDATE_POSITION_VALUE = 100e18;
+
     Config public immutable config;
     address public clearingHouse;
     address public vault;
@@ -109,16 +111,23 @@ contract AccountBalance is Ownable, IAccountBalance {
         return activePoolIds[trader];
     }
 
+    function getOwedRealizedPnl(address trader) external view returns (int256 pnl) {
+        return owedRealizedPnl[trader];
+    }
+
+    function getMarkPriceX18(PoolId poolId) external view returns (uint256 priceX18) {
+        return markPriceX18[poolId];
+    }
+
     function getTotalAbsPositionValue(address trader) public view returns (uint256 totalAbsPositionValue) {
         PoolId[] storage pools = activePoolIds[trader];
         uint256 len = pools.length;
         for (uint256 i = 0; i < len; i++) {
             PoolId poolId = pools[i];
-            int256 size = positions[trader][poolId].takerPositionSize;
+            PositionInfo storage info = positions[trader][poolId];
+            int256 size = info.takerPositionSize;
             if (size == 0) continue;
-            uint256 price = markPriceX18[poolId];
-            if (price == 0) continue;
-            totalAbsPositionValue += Math.mulDiv(PerpMath.abs(size), price, 1e18);
+            totalAbsPositionValue += _getAbsPositionValue(poolId, size, info.takerOpenNotional);
         }
     }
 
@@ -130,6 +139,30 @@ contract AccountBalance is Ownable, IAccountBalance {
         uint256 requirement = PerpMath.mulRatio(getTotalAbsPositionValue(trader), config.mmRatio());
         if (requirement > uint256(type(int256).max)) revert Int256Overflow();
         return int256(requirement);
+    }
+
+    function getLiquidatablePositionSize(address trader, PoolId poolId, int256 accountValue)
+        external
+        view
+        returns (int256 liquidatablePositionSize)
+    {
+        int256 marginRequirement = this.getMarginRequirementForLiquidation(trader);
+        PositionInfo storage info = positions[trader][poolId];
+        int256 positionSize = info.takerPositionSize;
+        if (accountValue >= marginRequirement || positionSize == 0) return 0;
+
+        uint256 positionValueAbs = _getAbsPositionValue(poolId, positionSize, info.takerOpenNotional);
+        if (positionValueAbs <= MIN_PARTIAL_LIQUIDATE_POSITION_VALUE) return positionSize;
+
+        uint24 maxLiquidateRatio = 1e6;
+        if (accountValue >= marginRequirement / 2 && positionValueAbs > 0) {
+            uint256 ratio = Math.mulDiv(getTotalAbsPositionValue(trader), 1e6, positionValueAbs * 2);
+            if (ratio < 1e6) {
+                maxLiquidateRatio = uint24(ratio);
+            }
+        }
+
+        return PerpMath.mulRatio(positionSize, maxLiquidateRatio);
     }
 
     function _syncActivePool(address trader, PoolId poolId) internal {
@@ -157,5 +190,14 @@ contract AccountBalance is Ownable, IAccountBalance {
             pools.pop();
             activePoolIndexPlusOne[trader][poolId] = 0;
         }
+    }
+
+    function _getAbsPositionValue(PoolId poolId, int256 size, int256 openNotional) internal view returns (uint256) {
+        uint256 price = markPriceX18[poolId];
+        if (price == 0 && size != 0 && openNotional != 0) {
+            price = Math.mulDiv(PerpMath.abs(openNotional), 1e18, PerpMath.abs(size));
+        }
+        if (price == 0) return 0;
+        return Math.mulDiv(PerpMath.abs(size), price, 1e18);
     }
 }
