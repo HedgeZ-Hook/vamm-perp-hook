@@ -8,6 +8,7 @@ out = "out"
 solc_version = "0.8.30"
 src = "src"
 via_ir = false
+optimizer_runs = 44444444
 
 [lint]
 exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
