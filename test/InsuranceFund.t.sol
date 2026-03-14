@@ -209,6 +209,38 @@ contract InsuranceFundTest is BaseTest {
         assertEq(capacity, expected);
     }
 
+    function testDistributeFeeCapsByVaultWithdrawableCollateral() public {
+        uint256 threshold = insuranceFund.distributionThreshold();
+        uint256 vaultBalance = 20e18;
+        uint256 walletBalance = threshold + 100e18;
+
+        usdc.mint(address(insuranceFund), walletBalance + vaultBalance);
+        vm.startPrank(address(insuranceFund));
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(vaultBalance);
+        vm.stopPrank();
+
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 distributed = insuranceFund.distributeFee();
+
+        assertEq(distributed, vaultBalance);
+        assertEq(usdc.balanceOf(treasury) - treasuryBefore, vaultBalance);
+    }
+
+    function testRepayUsesWalletBalanceToCoverNegativeVaultAccount() public {
+        vm.prank(address(clearingHouse));
+        accountBalance.modifyOwedRealizedPnl(address(insuranceFund), -100e18);
+
+        usdc.mint(address(insuranceFund), 60e18);
+        uint256 walletBefore = usdc.balanceOf(address(insuranceFund));
+        assertEq(walletBefore, 60e18);
+
+        uint256 repaid = insuranceFund.repay();
+        assertEq(repaid, 60e18);
+        assertEq(vault.usdcBalance(address(insuranceFund)), 60e18);
+        assertEq(usdc.balanceOf(address(insuranceFund)), 0);
+    }
+
     function _allowVirtualToken(VirtualToken token) internal {
         token.addWhitelist(address(this));
         token.addWhitelist(address(poolManager));

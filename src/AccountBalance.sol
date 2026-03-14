@@ -79,6 +79,10 @@ contract AccountBalance is Ownable, IAccountBalance {
         owedRealizedPnl[trader] += amount;
     }
 
+    function updateMarkPriceX18(PoolId poolId, uint256 priceX18) external onlyClearingHouse {
+        markPriceX18[poolId] = priceX18;
+    }
+
     function settleOwedRealizedPnl(address trader) external onlyVault returns (int256 pnl) {
         pnl = owedRealizedPnl[trader];
         owedRealizedPnl[trader] = 0;

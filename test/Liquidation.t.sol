@@ -24,6 +24,7 @@ import {Config} from "../src/Config.sol";
 import {AccountBalance} from "../src/AccountBalance.sol";
 import {ClearingHouse} from "../src/ClearingHouse.sol";
 import {Vault} from "../src/Vault.sol";
+import {FundingRate} from "../src/FundingRate.sol";
 import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
 import {PerpMath} from "../src/libraries/PerpMath.sol";
 
@@ -44,6 +45,7 @@ contract LiquidationTest is BaseTest {
     ClearingHouse internal clearingHouse;
     MockPriceOracle internal priceOracle;
     Vault internal vault;
+    FundingRate internal fundingRate;
 
     PoolKey internal vammPoolKey;
     PoolKey internal spotPoolKey;
@@ -95,6 +97,7 @@ contract LiquidationTest is BaseTest {
             swapRouter,
             spotPoolKey
         );
+        fundingRate = new FundingRate(poolManager, priceOracle, accountBalance, config);
 
         hook.registerVAMMPool(vammPoolKey);
         hook.registerSpotPool(spotPoolKey);
@@ -104,8 +107,11 @@ contract LiquidationTest is BaseTest {
         accountBalance.setVault(address(vault));
 
         clearingHouse.setVault(vault);
+        clearingHouse.setFundingRate(fundingRate);
         vault.setClearingHouse(address(clearingHouse));
         vault.setInsuranceFund(insuranceFund);
+        vault.setFundingRate(fundingRate);
+        fundingRate.setClearingHouse(address(clearingHouse));
 
         veth.addWhitelist(address(clearingHouse));
         vusdc.addWhitelist(address(clearingHouse));
@@ -217,6 +223,51 @@ contract LiquidationTest is BaseTest {
 
         assertGt(PerpMath.abs(positionAfter), 0);
         assertLt(PerpMath.abs(positionAfter), PerpMath.abs(positionBefore));
+    }
+
+    function testLiquidationUpdatesFundingSnapshot() public {
+        vm.prank(alice);
+        vault.deposit(27e18);
+        vm.prank(alice);
+        clearingHouse.openPosition(
+            IClearingHouse.OpenPositionParams({
+                isBaseToQuote: false, amount: 80e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
+            })
+        );
+
+        priceOracle.setPriceX18(0.7e18);
+        assertTrue(vault.isLiquidatable(alice));
+
+        vm.warp(block.timestamp + 1 days);
+
+        int256 pendingFunding = fundingRate.getPendingFundingPayment(alice, vammPoolId);
+        assertGt(pendingFunding, 0);
+        int256 beforeSnapshot = accountBalance.getLastTwPremiumGrowthGlobalX96(alice, vammPoolId);
+
+        vm.prank(bob);
+        clearingHouse.liquidate(alice);
+        int256 afterSnapshot = accountBalance.getLastTwPremiumGrowthGlobalX96(alice, vammPoolId);
+
+        assertGt(afterSnapshot, beforeSnapshot);
+    }
+
+    function testLiquidationSyncsMarkPriceFromVault() public {
+        vm.prank(alice);
+        vault.deposit(27e18);
+        vm.prank(alice);
+        clearingHouse.openPosition(
+            IClearingHouse.OpenPositionParams({
+                isBaseToQuote: false, amount: 80e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
+            })
+        );
+
+        accountBalance.setMarkPriceX18(vammPoolId, 2e18);
+        priceOracle.setPriceX18(0.7e18);
+
+        vm.prank(bob);
+        clearingHouse.liquidate(alice);
+
+        assertEq(accountBalance.getMarkPriceX18(vammPoolId), 0.7e18);
     }
 
     function _allowVirtualToken(VirtualToken token) internal {

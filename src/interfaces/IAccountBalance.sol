@@ -19,6 +19,8 @@ interface IAccountBalance {
 
     function modifyOwedRealizedPnl(address trader, int256 amount) external;
 
+    function updateMarkPriceX18(PoolId poolId, uint256 priceX18) external;
+
     function settleOwedRealizedPnl(address trader) external returns (int256 pnl);
 
     function updateLastTwPremiumGrowthGlobal(address trader, PoolId poolId, int256 lastTwPremiumGrowthGlobalX96)

@@ -50,7 +50,19 @@ contract InsuranceFund is Ownable {
         int256 threshold = int256(distributionThreshold);
         if (capacity <= threshold) return 0;
 
-        amountDistributed = uint256(capacity - threshold);
+        uint256 overThreshold = uint256(capacity - threshold);
+        int256 freeCollateral = vault.getFreeCollateral(address(this));
+        uint256 withdrawable = freeCollateral > 0 ? uint256(freeCollateral) : 0;
+
+        int256 netCashBalance = vault.getNetCashBalance(address(this));
+        uint256 internalBalance = netCashBalance > 0 ? uint256(netCashBalance) : 0;
+        if (withdrawable > internalBalance) {
+            withdrawable = internalBalance;
+        }
+
+        amountDistributed = overThreshold < withdrawable ? overThreshold : withdrawable;
+        if (amountDistributed == 0) return 0;
+
         vault.withdraw(amountDistributed);
         usdc.transfer(beneficiary, amountDistributed);
     }

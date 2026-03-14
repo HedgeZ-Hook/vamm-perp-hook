@@ -37,6 +37,7 @@ contract Vault is Ownable, IVault {
     error NotLPTokenOwner(address caller, uint256 tokenId);
     error NativeTransferFailed(address to, uint256 amount);
     error InsufficientInternalBalance(address trader, int256 balance, uint256 requestedAmount);
+    error InvalidForcedSwapSlippageRatio(uint24 ratio);
 
     struct LPCollateral {
         uint256 tokenId;
@@ -63,6 +64,7 @@ contract Vault is Ownable, IVault {
     address public insuranceFund;
 
     uint24 public lpRemoveBufferRatio = 20_000;
+    uint24 public forcedSwapSlippageRatio = 50_000;
 
     mapping(address => int256) public usdcBalance;
     mapping(uint256 => LPCollateral) public lpCollaterals;
@@ -116,6 +118,11 @@ contract Vault is Ownable, IVault {
 
     function setLpRemoveBufferRatio(uint24 lpRemoveBufferRatio_) external onlyOwner {
         lpRemoveBufferRatio = lpRemoveBufferRatio_;
+    }
+
+    function setForcedSwapSlippageRatio(uint24 forcedSwapSlippageRatio_) external onlyOwner {
+        if (forcedSwapSlippageRatio_ > 1e6) revert InvalidForcedSwapSlippageRatio(forcedSwapSlippageRatio_);
+        forcedSwapSlippageRatio = forcedSwapSlippageRatio_;
     }
 
     function setFundingRate(IFundingRate fundingRate_) external onlyOwner {
@@ -245,7 +252,10 @@ contract Vault is Ownable, IVault {
         uint128 liquidityToRemove = _estimateLiquidityToRemove(currentLiquidity, lpValue, usdcRemaining);
 
         (uint256 ethReceived, uint256 usdcReceived) = _removeLiquidityFromPosition(tokenId, liquidityToRemove);
-        uint256 usdcFromSwap = _swapETHtoUSDC(ethReceived);
+        uint256 usdcFromSwap;
+        if (usdcReceived < usdcRemaining) {
+            usdcFromSwap = _swapETHtoUSDC(ethReceived, usdcRemaining - usdcReceived, false);
+        }
         recovered = usdcReceived + usdcFromSwap;
 
         removedFully = liquidityToRemove >= currentLiquidity;
@@ -393,13 +403,32 @@ contract Vault is Ownable, IVault {
         }
     }
 
-    function _swapETHtoUSDC(uint256 ethAmount) internal returns (uint256 usdcOut) {
+    function _swapETHtoUSDC(uint256 ethAmount, uint256 requiredUsdcOut, bool strictMinOut)
+        internal
+        returns (uint256 usdcOut)
+    {
         if (ethAmount == 0) return 0;
+        if (poolManager.getLiquidity(spotPoolId) == 0) return 0;
         uint256 usdcBefore = usdc.balanceOf(address(this));
+        uint256 expectedUsdcOut = Math.mulDiv(ethAmount, getMarkPriceX18(), 1e18);
+        uint256 minUsdcOut = Math.mulDiv(expectedUsdcOut, uint256(1e6) - forcedSwapSlippageRatio, 1e6);
+        if (requiredUsdcOut > 0 && minUsdcOut > requiredUsdcOut) {
+            minUsdcOut = requiredUsdcOut;
+        }
         bool zeroForOne = spotEthIsCurrency0;
-        swapRouter.swapExactTokensForTokens{value: ethAmount}(
-            ethAmount, 0, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
-        );
+        if (strictMinOut) {
+            swapRouter.swapExactTokensForTokens{value: ethAmount}(
+                ethAmount, minUsdcOut, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
+            );
+        } else {
+            try swapRouter.swapExactTokensForTokens{value: ethAmount}(
+                ethAmount, minUsdcOut, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
+            ) {} catch {
+                swapRouter.swapExactTokensForTokens{value: ethAmount}(
+                    ethAmount, 0, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
+                );
+            }
+        }
         return usdc.balanceOf(address(this)) - usdcBefore;
     }
 
@@ -410,7 +439,10 @@ contract Vault is Ownable, IVault {
         int256 netCashBalance = getNetCashBalance(trader);
         if (netCashBalance < 0) {
             uint256 usdcDebt = uint256(-netCashBalance);
-            uint256 usdcFromSwap = _swapETHtoUSDC(ethAmount);
+            uint256 usdcFromSwap;
+            if (usdcAmount < usdcDebt) {
+                usdcFromSwap = _swapETHtoUSDC(ethAmount, usdcDebt - usdcAmount, true);
+            }
             uint256 totalUsdc = usdcAmount + usdcFromSwap;
 
             uint256 debtRepayment = totalUsdc > usdcDebt ? usdcDebt : totalUsdc;

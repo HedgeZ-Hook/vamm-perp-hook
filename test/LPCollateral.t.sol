@@ -199,6 +199,22 @@ contract LPCollateralTest is BaseTest {
         assertGt(usdc.balanceOf(alice), usdcBefore);
     }
 
+    function testVoluntaryWithdrawRevertsWhenForcedSwapOutputFallsBelowMinOut() public {
+        _depositAliceLP();
+        _mintSpotFullRangeFor(bob, 1_000e18);
+
+        vm.prank(address(clearingHouse));
+        accountBalance.modifyOwedRealizedPnl(alice, -10_000e18);
+
+        // Force a strict min-out based on oracle, then set oracle far above spot to trigger slippage revert.
+        vault.setForcedSwapSlippageRatio(0);
+        priceOracle.setPriceX18(100e18);
+
+        vm.expectRevert();
+        vm.prank(alice);
+        vault.withdrawLP(aliceSpotTokenId);
+    }
+
     function testPartialDecreaseUpdatesLiquidity() public {
         _depositAliceLP();
 

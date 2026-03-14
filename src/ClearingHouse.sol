@@ -146,8 +146,10 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         if (address(vault) == address(0)) revert VaultNotSet();
         if (!vault.isLiquidatable(trader)) revert NotLiquidatable(trader);
 
-        int256 accountValue = vault.getAccountValue(trader);
+        _settleFunding(trader);
         uint256 markPriceX18 = vault.getMarkPriceX18();
+        accountBalance.updateMarkPriceX18(vammPoolId, markPriceX18);
+        int256 accountValue = vault.getAccountValue(trader);
         LiquidationResult memory result = _liquidateAtMark(trader, accountValue, markPriceX18);
         liquidatedPositionSize = result.liquidatedPositionSize;
 
