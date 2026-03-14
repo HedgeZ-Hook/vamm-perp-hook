@@ -423,7 +423,8 @@ contract Vault is Ownable, IVault {
         } else {
             try swapRouter.swapExactTokensForTokens{value: ethAmount}(
                 ethAmount, minUsdcOut, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
-            ) {} catch {
+            ) {}
+            catch {
                 swapRouter.swapExactTokensForTokens{value: ethAmount}(
                     ethAmount, 0, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
                 );
