@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -56,7 +57,7 @@ contract InsuranceFundTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                     | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0xbbbb << 144)
         );
@@ -73,12 +74,12 @@ contract InsuranceFundTest is BaseTest {
         _allowVirtualToken(vusdc);
 
         (Currency currency0, Currency currency1) = _orderedCurrencies(address(veth), address(vusdc));
-        vammPoolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
+        vammPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
         vammPoolId = vammPoolKey.toId();
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
 
-        spotPoolKey = PoolKey(Currency.wrap(address(0)), Currency.wrap(address(usdc)), 3000, 60, IHooks(hook));
+        spotPoolKey = PoolKey(Currency.wrap(address(0)), Currency.wrap(address(usdc)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
 
         config = new Config();
         accountBalance = new AccountBalance(config);
@@ -97,6 +98,8 @@ contract InsuranceFundTest is BaseTest {
         insuranceFund = new InsuranceFund(vault, IERC20(address(usdc)), treasury, 100e18);
 
         hook.registerVAMMPool(vammPoolKey);
+        hook.setVerifiedRouter(address(positionManager), true);
+        hook.setVerifiedRouter(address(swapRouter), true);
         hook.registerSpotPool(spotPoolKey);
         hook.setClearingHouse(address(clearingHouse));
 

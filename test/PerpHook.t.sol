@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Vm} from "forge-std/Vm.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -15,6 +16,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 
 import {PerpHook} from "../src/PerpHook.sol";
 import {VirtualToken} from "../src/VirtualToken.sol";
+import {MockPriceOracle} from "./MockPriceOracle.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 
@@ -28,8 +30,10 @@ contract PerpHookTest is BaseTest {
     bytes32 internal constant SPOT_LP_REMOVED_SIG = keccak256("SpotLPRemoved(address)");
     bytes32 internal constant VAMM_SWAP_ATTEMPT_SIG = keccak256("VammSwapAttempt(address)");
     bytes32 internal constant VAMM_SWAP_EXECUTED_SIG = keccak256("VammSwapExecuted(address,int256)");
+    bytes32 internal constant SWAP_SIG = keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
 
     PerpHook internal hook;
+    MockPriceOracle internal priceOracle;
     PoolKey internal spotPoolKey;
     PoolKey internal vammPoolKey;
     PoolId internal spotPoolId;
@@ -41,7 +45,7 @@ contract PerpHookTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                     | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x5555 << 144)
         );
@@ -50,7 +54,7 @@ contract PerpHookTest is BaseTest {
         hook = PerpHook(flags);
 
         (Currency spotCurrency0, Currency spotCurrency1) = deployCurrencyPair();
-        spotPoolKey = PoolKey(spotCurrency0, spotCurrency1, 3000, 60, IHooks(hook));
+        spotPoolKey = PoolKey(spotCurrency0, spotCurrency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
 
         VirtualToken veth = new VirtualToken("Virtual ETH", "vETH");
         VirtualToken vusdc = new VirtualToken("Virtual USDC", "vUSDC");
@@ -61,13 +65,19 @@ contract PerpHookTest is BaseTest {
         _allowVirtualToken(vusdc);
 
         (Currency vammCurrency0, Currency vammCurrency1) = _orderedCurrencies(address(veth), address(vusdc));
-        vammPoolKey = PoolKey(vammCurrency0, vammCurrency1, 3000, 60, IHooks(hook));
+        vammPoolKey = PoolKey(vammCurrency0, vammCurrency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
 
         poolManager.initialize(spotPoolKey, Constants.SQRT_PRICE_1_1);
         poolManager.initialize(vammPoolKey, Constants.SQRT_PRICE_1_1);
 
         hook.registerSpotPool(spotPoolKey);
         hook.registerVAMMPool(vammPoolKey);
+        hook.setVerifiedRouter(address(positionManager), true);
+        hook.setVerifiedRouter(address(swapRouter), true);
+        hook.setClearingHouse(address(this));
+
+        priceOracle = new MockPriceOracle(1e18);
+        hook.setPriceOracle(priceOracle, 0);
 
         spotPoolId = spotPoolKey.toId();
         vammPoolId = vammPoolKey.toId();
@@ -131,6 +141,69 @@ contract PerpHookTest is BaseTest {
         assertEq(_countHookLogs(logs, SPOT_LP_REMOVED_SIG), 1);
     }
 
+    function testVammSwapUnauthorizedReverts() public {
+        hook.setClearingHouse(makeAddr("newCH"));
+        vm.expectRevert();
+        _swap(vammPoolKey);
+    }
+
+    function testVammDynamicFeeAlwaysZero() public {
+        vm.recordLogs();
+        _swap(vammPoolKey);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint24 fee = _lastPoolSwapFee(logs, vammPoolId);
+        assertEq(fee, 0);
+    }
+
+    function testSpotFeeIncreasesWhenSpreadIncreases() public {
+        uint256 spotPriceX18 = hook.getSpotPriceX18();
+        priceOracle.setPriceX18(spotPriceX18);
+
+        uint24 baselineFee = _spotSwapFee(1e18, true);
+        priceOracle.setPriceX18((spotPriceX18 * 13) / 10); // +30% oracle spread
+        uint24 spreadFee = _spotSwapFee(1e18, true);
+
+        assertGe(baselineFee, hook.minFeeBps() * 100);
+        assertLe(baselineFee, hook.maxFeeBps() * 100);
+        assertGe(spreadFee, hook.minFeeBps() * 100);
+        assertLe(spreadFee, hook.maxFeeBps() * 100);
+        assertGt(spreadFee, baselineFee);
+    }
+
+    function testSpotFeeIncreasesWithTradeSize() public {
+        hook.setSpotFeeConfig(2, 6, 40, 1e18, 0); // disable EMA for isolated size check
+        uint256 spotPriceX18 = hook.getSpotPriceX18();
+        priceOracle.setPriceX18(spotPriceX18);
+
+        uint24 smallFee = _spotSwapFee(2e16, true);
+        uint24 largeFee = _spotSwapFee(2e18, true);
+
+        assertGt(largeFee, smallFee);
+    }
+
+    function testSpotVolEmaIncreasesAfterVolatileSwap() public {
+        hook.setSpotFeeConfig(2, 6, 40, 1e18, 500_000);
+        uint24 beforeEma = hook.spotVolEmaBps();
+
+        _swapWithAmount(spotPoolKey, 5e18, true);
+
+        uint24 afterEma = hook.spotVolEmaBps();
+        assertGt(afterEma, beforeEma);
+    }
+
+    function testSpotVolEmaDecaysAfterCalmerSwap() public {
+        hook.setSpotFeeConfig(2, 6, 40, 1e18, 500_000);
+
+        _swapWithAmount(spotPoolKey, 5e18, true);
+        uint24 afterVolatile = hook.spotVolEmaBps();
+
+        _swapWithAmount(spotPoolKey, 1e14, true);
+        uint24 afterCalmer = hook.spotVolEmaBps();
+
+        assertLt(afterCalmer, afterVolatile);
+    }
+
     function _allowVirtualToken(VirtualToken token) internal {
         token.addWhitelist(address(this));
         token.addWhitelist(address(poolManager));
@@ -182,15 +255,38 @@ contract PerpHookTest is BaseTest {
     }
 
     function _swap(PoolKey memory key) internal returns (BalanceDelta delta) {
+        delta = _swapWithAmount(key, 1e18, true);
+    }
+
+    function _swapWithAmount(PoolKey memory key, uint256 amountIn, bool zeroForOne) internal returns (BalanceDelta delta) {
         delta = swapRouter.swapExactTokensForTokens({
-            amountIn: 1e18,
+            amountIn: amountIn,
             amountOutMin: 0,
-            zeroForOne: true,
+            zeroForOne: zeroForOne,
             poolKey: key,
             hookData: Constants.ZERO_BYTES,
             receiver: address(this),
             deadline: block.timestamp + 1
         });
+    }
+
+    function _spotSwapFee(uint256 amountIn, bool zeroForOne) internal returns (uint24 fee) {
+        vm.recordLogs();
+        _swapWithAmount(spotPoolKey, amountIn, zeroForOne);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        fee = _lastPoolSwapFee(logs, spotPoolId);
+    }
+
+    function _lastPoolSwapFee(Vm.Log[] memory logs, PoolId poolId) internal view returns (uint24 fee) {
+        bytes32 poolIdTopic = bytes32(PoolId.unwrap(poolId));
+        for (uint256 i = logs.length; i > 0; i--) {
+            Vm.Log memory entry = logs[i - 1];
+            if (entry.emitter != address(poolManager) || entry.topics.length < 2) continue;
+            if (entry.topics[0] != SWAP_SIG || entry.topics[1] != poolIdTopic) continue;
+            (,,,,, fee) = abi.decode(entry.data, (int128, int128, uint160, uint128, int24, uint24));
+            return fee;
+        }
+        revert("swap fee not found");
     }
 
     function _countHookLogs(Vm.Log[] memory logs, bytes32 sig) internal view returns (uint256 count) {

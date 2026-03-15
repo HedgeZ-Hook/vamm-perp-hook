@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -50,7 +51,7 @@ contract OpenCloseTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                     | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x6666 << 144)
         );
@@ -66,7 +67,7 @@ contract OpenCloseTest is BaseTest {
         _allowVirtualToken(vusdc);
 
         (Currency currency0, Currency currency1) = _orderedCurrencies(address(veth), address(vusdc));
-        vammPoolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
+        vammPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
         vammPoolId = vammPoolKey.toId();
@@ -78,6 +79,8 @@ contract OpenCloseTest is BaseTest {
         accountBalance.setClearingHouse(address(clearingHouse));
         accountBalance.setVault(address(this));
         hook.registerVAMMPool(vammPoolKey);
+        hook.setVerifiedRouter(address(positionManager), true);
+        hook.setVerifiedRouter(address(swapRouter), true);
         hook.setClearingHouse(address(clearingHouse));
 
         veth.addWhitelist(address(clearingHouse));
