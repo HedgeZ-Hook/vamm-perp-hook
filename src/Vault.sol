@@ -77,6 +77,9 @@ contract Vault is Ownable, IVault {
     event LPForceLiquidated(
         address indexed trader, uint256 indexed tokenId, uint128 liquidityRemoved, uint256 usdcRecovered
     );
+    event Deposited(address indexed trader, uint256 amount);
+    event Withdrawn(address indexed trader, uint256 amount);
+    event LiquidationPriceChange(address indexed trader, uint256 liquidationPriceX18);
 
     modifier onlyClearingHouse() {
         if (msg.sender != clearingHouse) revert Unauthorized(msg.sender);
@@ -132,6 +135,8 @@ contract Vault is Ownable, IVault {
     function deposit(uint256 amount) external {
         usdc.transferFrom(msg.sender, address(this), amount);
         usdcBalance[msg.sender] += int256(amount);
+        emit Deposited(msg.sender, amount);
+        _emitLiquidationPriceChange(msg.sender);
     }
 
     function withdraw(uint256 amount) external {
@@ -143,6 +148,8 @@ contract Vault is Ownable, IVault {
         }
         usdcBalance[msg.sender] -= int256(amount);
         usdc.transfer(msg.sender, amount);
+        emit Withdrawn(msg.sender, amount);
+        _emitLiquidationPriceChange(msg.sender);
     }
 
     function depositLP(uint256 tokenId) external {
@@ -165,6 +172,7 @@ contract Vault is Ownable, IVault {
         lpTokenIndexPlusOne[tokenId] = userLPTokenIds[msg.sender].length;
 
         emit LPDeposited(msg.sender, tokenId, liquidity);
+        _emitLiquidationPriceChange(msg.sender);
     }
 
     function withdrawLP(uint256 tokenId) external returns (uint256 ethAmount, uint256 usdcAmount) {
@@ -181,6 +189,7 @@ contract Vault is Ownable, IVault {
         IERC721(address(positionManager)).transferFrom(address(this), msg.sender, tokenId);
         (ethAmount, usdcAmount) = _settleVoluntaryProceeds(msg.sender, ethAmount, usdcAmount);
         emit LPWithdrawn(msg.sender, tokenId, liquidityToRemove);
+        _emitLiquidationPriceChange(msg.sender);
     }
 
     function decreaseLP(uint256 tokenId, uint128 liquidityToRemove)
@@ -202,6 +211,7 @@ contract Vault is Ownable, IVault {
         }
 
         emit LPDecreased(msg.sender, tokenId, liquidityToRemove, liquidityLeft);
+        _emitLiquidationPriceChange(msg.sender);
     }
 
     function forceLiquidateLP(address trader, uint256 usdcNeeded)
@@ -235,6 +245,8 @@ contract Vault is Ownable, IVault {
         if (usdcRecovered > 0) {
             usdcBalance[trader] += int256(usdcRecovered);
         }
+
+        _emitLiquidationPriceChange(trader);
     }
 
     function _forceLiquidateSinglePosition(
@@ -283,6 +295,8 @@ contract Vault is Ownable, IVault {
         }
         usdcBalance[from] -= int256(amount);
         usdcBalance[to] += int256(amount);
+        _emitLiquidationPriceChange(from);
+        if (to != from) _emitLiquidationPriceChange(to);
     }
 
     function getAccountValue(address trader) public view returns (int256 accountValue) {
@@ -343,6 +357,41 @@ contract Vault is Ownable, IVault {
         return accountValue < marginRequirement;
     }
 
+    function getLiquidationPriceX18(address trader) public view returns (uint256 liquidationPriceX18) {
+        (int256 netPositionSize, int256 totalOpenNotional, uint256 totalAbsPositionSize) =
+            _getPositionAggregates(trader);
+        if (totalAbsPositionSize == 0) return 0;
+
+        (uint256 lpEthAmount, uint256 lpUsdcAmount) = _getLPCollateralAmounts(trader);
+        int256 pendingFunding = _getPendingFundingPayment(trader);
+
+        int256 constantTerm = usdcBalance[trader] + accountBalance.getOwedRealizedPnl(trader) + totalOpenNotional
+            + int256(lpUsdcAmount) - pendingFunding;
+        int256 mmWeightedAbsSize = int256(PerpMath.mulRatio(totalAbsPositionSize, config.mmRatio()));
+        int256 priceSlope = netPositionSize + int256(lpEthAmount) - mmWeightedAbsSize;
+        if (priceSlope == 0) return 0;
+
+        int256 signedNumerator = priceSlope > 0 ? PerpMath.neg256(constantTerm) : constantTerm;
+        int256 priceX18 = PerpMath.mulDiv(signedNumerator, int256(1e18), PerpMath.abs(priceSlope));
+        if (priceX18 <= 0) return 0;
+        return uint256(priceX18);
+    }
+
+    function notifyLiquidationPriceChange(address trader) external onlyClearingHouse {
+        _emitLiquidationPriceChange(trader);
+    }
+
+    function getLiquidationState(address trader)
+        external
+        view
+        returns (int256 accountValue, int256 marginRequirement, uint256 totalAbsPositionValue, bool liquidatable)
+    {
+        accountValue = getAccountValue(trader);
+        totalAbsPositionValue = _getTotalAbsPositionValue(trader);
+        marginRequirement = int256(PerpMath.mulRatio(totalAbsPositionValue, config.mmRatio()));
+        liquidatable = accountValue < marginRequirement;
+    }
+
     function settleBadDebt(address trader) external onlyClearingHouse {
         if (accountBalance.getActivePoolIds(trader).length != 0) return;
         if (userLPTokenIds[trader].length != 0) return;
@@ -354,6 +403,8 @@ contract Vault is Ownable, IVault {
         uint256 badDebt = uint256(-cashBalance);
         usdcBalance[trader] = 0;
         usdcBalance[insuranceFund] -= int256(badDebt);
+        _emitLiquidationPriceChange(trader);
+        _emitLiquidationPriceChange(insuranceFund);
     }
 
     function _requireLpRemovalMargin(address trader, uint256 tokenId, uint128 liquidityToRemove) internal view {
@@ -540,5 +591,45 @@ contract Vault is Ownable, IVault {
         for (uint256 i = 0; i < len; i++) {
             pendingFundingPayment += fundingRate.getPendingFundingPayment(trader, pools[i]);
         }
+    }
+
+    function _getPositionAggregates(address trader)
+        internal
+        view
+        returns (int256 netPositionSize, int256 totalOpenNotional, uint256 totalAbsPositionSize)
+    {
+        PoolId[] memory pools = accountBalance.getActivePoolIds(trader);
+        uint256 len = pools.length;
+        for (uint256 i = 0; i < len; i++) {
+            IAccountBalance.PositionInfo memory info = accountBalance.getPositionInfo(trader, pools[i]);
+            if (info.takerPositionSize == 0) continue;
+            netPositionSize += info.takerPositionSize;
+            totalOpenNotional += info.takerOpenNotional;
+            totalAbsPositionSize += PerpMath.abs(info.takerPositionSize);
+        }
+    }
+
+    function _getLPCollateralAmounts(address trader)
+        internal
+        view
+        returns (uint256 totalEthAmount, uint256 totalUsdcAmount)
+    {
+        uint256[] storage tokenIds = userLPTokenIds[trader];
+        uint256 len = tokenIds.length;
+        if (len == 0) return (0, 0);
+
+        uint160 sqrtPriceX96 = _getSpotSqrtPriceX96();
+        for (uint256 i = 0; i < len; i++) {
+            LPCollateral storage lp = lpCollaterals[tokenIds[i]];
+            if (lp.liquidity == 0) continue;
+            (, uint256 ethAmount, uint256 usdcAmount) =
+                LPValuation.getLPValue(sqrtPriceX96, lp.tickLower, lp.tickUpper, lp.liquidity, 1e18, spotEthIsCurrency0);
+            totalEthAmount += ethAmount;
+            totalUsdcAmount += usdcAmount;
+        }
+    }
+
+    function _emitLiquidationPriceChange(address trader) internal {
+        emit LiquidationPriceChange(trader, getLiquidationPriceX18(trader));
     }
 }

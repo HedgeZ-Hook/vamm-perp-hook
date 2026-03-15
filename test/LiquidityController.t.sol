@@ -43,8 +43,9 @@ contract LiquidityControllerTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x5555 << 144)
         );
         deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
@@ -96,14 +97,14 @@ contract LiquidityControllerTest is BaseTest {
     function testUpdateFromOracleIsPermissionless() public {
         address keeper = makeAddr("keeper");
         vm.prank(keeper);
-        controller.updateFromOracle(1e18); // no-op here because oracle ~= vAMM at setup
+        controller.updateFromOracle(); // no-op here because oracle ~= vAMM at setup
     }
 
     function testNoopWithinDeadband() public {
         uint256 beforePrice = controller.getVammPriceX18();
         oracle.setPriceX18((beforePrice * (10_000 - DEADBAND_BPS)) / 10_000);
 
-        (bool executed,, uint256 usedAmount) = controller.updateFromOracle(1e18);
+        (bool executed,, uint256 usedAmount) = controller.updateFromOracle();
         uint256 afterPrice = controller.getVammPriceX18();
 
         assertFalse(executed);
@@ -115,12 +116,13 @@ contract LiquidityControllerTest is BaseTest {
         uint256 beforePrice = controller.getVammPriceX18();
         oracle.setPriceX18((beforePrice * 80) / 100); // oracle lower than vAMM -> zeroForOne
 
-        (bool executed, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle(1e18);
+        (bool executed, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle();
         uint256 afterPrice = controller.getVammPriceX18();
 
         assertTrue(executed);
         assertTrue(zeroForOne);
-        assertEq(usedAmount, 1e18);
+        assertGt(usedAmount, 0);
+        assertLe(usedAmount, MAX_AMOUNT_IN);
         assertLt(afterPrice, beforePrice);
     }
 
@@ -128,12 +130,13 @@ contract LiquidityControllerTest is BaseTest {
         uint256 beforePrice = controller.getVammPriceX18();
         oracle.setPriceX18((beforePrice * 120) / 100); // oracle higher than vAMM -> oneForZero
 
-        (bool executed, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle(1e18);
+        (bool executed, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle();
         uint256 afterPrice = controller.getVammPriceX18();
 
         assertTrue(executed);
         assertFalse(zeroForOne);
-        assertEq(usedAmount, 1e18);
+        assertGt(usedAmount, 0);
+        assertLe(usedAmount, MAX_AMOUNT_IN);
         assertGt(afterPrice, beforePrice);
     }
 
@@ -141,7 +144,7 @@ contract LiquidityControllerTest is BaseTest {
         uint256 beforePrice = controller.getVammPriceX18();
         oracle.setPriceX18((beforePrice * 140) / 100);
 
-        (, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle(100e18);
+        (, bool zeroForOne, uint256 usedAmount) = controller.updateFromOracle();
         assertEq(usedAmount, MAX_AMOUNT_IN);
         assertFalse(zeroForOne);
     }
@@ -157,7 +160,7 @@ contract LiquidityControllerTest is BaseTest {
                 LiquidityController.VammLiquidityBelowFloor.selector, uint128(1_000_000e18), type(uint128).max
             )
         );
-        controller.updateFromOracle(1e18);
+        controller.updateFromOracle();
     }
 
     function _allowVirtualToken(VirtualToken token) internal {

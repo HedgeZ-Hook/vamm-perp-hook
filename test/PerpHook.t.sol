@@ -45,8 +45,9 @@ contract PerpHookTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x5555 << 144)
         );
         bytes memory constructorArgs = abi.encode(poolManager);
@@ -258,7 +259,10 @@ contract PerpHookTest is BaseTest {
         delta = _swapWithAmount(key, 1e18, true);
     }
 
-    function _swapWithAmount(PoolKey memory key, uint256 amountIn, bool zeroForOne) internal returns (BalanceDelta delta) {
+    function _swapWithAmount(PoolKey memory key, uint256 amountIn, bool zeroForOne)
+        internal
+        returns (BalanceDelta delta)
+    {
         delta = swapRouter.swapExactTokensForTokens({
             amountIn: amountIn,
             amountOutMin: 0,

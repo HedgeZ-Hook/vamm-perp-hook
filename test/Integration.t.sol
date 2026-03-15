@@ -62,8 +62,9 @@ contract IntegrationTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0xcccc << 144)
         );
         deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
@@ -84,7 +85,9 @@ contract IntegrationTest is BaseTest {
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
 
-        spotPoolKey = PoolKey(Currency.wrap(address(0)), Currency.wrap(address(usdc)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        spotPoolKey = PoolKey(
+            Currency.wrap(address(0)), Currency.wrap(address(usdc)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook)
+        );
 
         config = new Config();
         accountBalance = new AccountBalance(config);

@@ -36,6 +36,10 @@ interface IVault {
 
     function isLiquidatable(address trader) external view returns (bool);
 
+    function getLiquidationPriceX18(address trader) external view returns (uint256 liquidationPriceX18);
+
+    function notifyLiquidationPriceChange(address trader) external;
+
     function insuranceFund() external view returns (address);
 
     function settleBadDebt(address trader) external;

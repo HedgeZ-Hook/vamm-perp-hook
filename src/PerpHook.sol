@@ -54,7 +54,9 @@ contract PerpHook is BaseHook, Ownable {
     event SpotLPAdded(address indexed sender, int256 liquidity);
     event SpotLPRemovalRequested(address indexed sender);
     event SpotLPRemoved(address indexed sender);
-    event SpotFeeParamsUpdated(uint24 minFeeBps, uint24 baseFeeBps, uint24 maxFeeBps, uint256 sizeRefQuote, uint24 emaAlpha);
+    event SpotFeeParamsUpdated(
+        uint24 minFeeBps, uint24 baseFeeBps, uint24 maxFeeBps, uint256 sizeRefQuote, uint24 emaAlpha
+    );
     event SpotVolEmaUpdated(uint24 previousEmaBps, uint24 newEmaBps, uint24 instantMoveBps);
     event SpotFeeOverrideApplied(address indexed sender, uint24 feePips);
 
@@ -164,11 +166,12 @@ contract PerpHook is BaseHook, Ownable {
             uint256 quoteNotional = _deriveQuoteNotional(params, spotPriceX18);
             uint24 feePips = _computeSpotFeePips(quoteNotional, spotPriceX18, oraclePriceX18);
             emit SpotFeeOverrideApplied(sender, feePips);
-            return (
-                BaseHook.beforeSwap.selector,
-                BeforeSwapDeltaLibrary.ZERO_DELTA,
-                feePips | LPFeeLibrary.OVERRIDE_FEE_FLAG
-            );
+            return
+                (
+                    BaseHook.beforeSwap.selector,
+                    BeforeSwapDeltaLibrary.ZERO_DELTA,
+                    feePips | LPFeeLibrary.OVERRIDE_FEE_FLAG
+                );
         }
 
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -278,7 +281,8 @@ contract PerpHook is BaseHook, Ownable {
         pure
         returns (uint256 quoteNotional)
     {
-        uint256 absAmountSpecified = params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+        uint256 absAmountSpecified =
+            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
 
         // Assume spot quote token is currency1 (ETH/USDC style pool).
         if (params.zeroForOne) {

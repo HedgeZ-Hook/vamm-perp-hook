@@ -100,6 +100,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.modifyTakerBalance(msg.sender, vammPoolId, base, quote);
         _chargeTradeFee(msg.sender, quote);
         _enforceMargin(msg.sender, config.imRatio());
+        _notifyLiquidationPriceChange(msg.sender);
         emit PositionOpened(msg.sender, base, quote);
     }
 
@@ -131,6 +132,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.settleBalanceAndDeregister(msg.sender, vammPoolId, base, quoteForOpenNotional, realizedPnl);
         _chargeTradeFee(msg.sender, quote);
         _enforceMargin(msg.sender, config.mmRatio());
+        _notifyLiquidationPriceChange(msg.sender);
         emit PositionClosed(msg.sender, base, quote, realizedPnl);
     }
 
@@ -169,6 +171,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
             vault.settleBadDebt(trader);
         }
 
+        _notifyLiquidationPriceChange(trader);
         emit PositionLiquidated(trader, msg.sender, liquidatedPositionSize, result.realizedPnl, penalty);
     }
 
@@ -317,5 +320,10 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
 
         accountBalance.modifyOwedRealizedPnl(trader, -int256(feeAmount));
         accountBalance.modifyOwedRealizedPnl(insuranceFund, int256(feeAmount));
+    }
+
+    function _notifyLiquidationPriceChange(address trader) internal {
+        if (address(vault) == address(0)) return;
+        vault.notifyLiquidationPriceChange(trader);
     }
 }

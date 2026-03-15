@@ -68,8 +68,9 @@ contract ScenarioProofTest is BaseTest {
 
         address flags = address(
             uint160(
-                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
+                    | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0xdddd << 144)
         );
         deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
@@ -90,8 +91,9 @@ contract ScenarioProofTest is BaseTest {
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
 
-        spotPoolKey =
-            PoolKey(Currency.wrap(address(0)), Currency.wrap(address(usdc)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
+        spotPoolKey = PoolKey(
+            Currency.wrap(address(0)), Currency.wrap(address(usdc)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook)
+        );
         spotPoolId = spotPoolKey.toId();
 
         config = new Config();
@@ -127,9 +129,8 @@ contract ScenarioProofTest is BaseTest {
         vault.setFundingRate(fundingRate);
         fundingRate.setClearingHouse(address(clearingHouse));
 
-        liquidityController = new LiquidityController(
-            poolManager, swapRouter, priceOracle, vammPoolKey, 0, 10, 30, 5e18, 1e18
-        );
+        liquidityController =
+            new LiquidityController(poolManager, swapRouter, priceOracle, vammPoolKey, 0, 10, 30, 5e18, 1e18);
         hook.setLiquidityController(address(liquidityController));
 
         veth.addWhitelist(address(clearingHouse));
@@ -188,10 +189,7 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         (int256 openBase, int256 openQuote) = clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 10e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 10e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -242,10 +240,7 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: true,
-                amount: 400e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: true, amount: 400e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -264,12 +259,12 @@ contract ScenarioProofTest is BaseTest {
         uint256 prePrice = liquidityController.getVammPriceX18();
         priceOracle.setPriceX18((prePrice * 80) / 100); // oracle lower -> expect zeroForOne
 
-        (bool executed, bool zeroForOne, uint256 usedAmountIn) = liquidityController.updateFromOracle(100e18);
+        (bool executed, bool zeroForOne, uint256 usedAmountIn) = liquidityController.updateFromOracle();
         uint256 postPrice = liquidityController.getVammPriceX18();
 
         assertTrue(executed);
         assertTrue(zeroForOne);
-        assertEq(usedAmountIn, 5e18);
+        assertEq(usedAmountIn, 5e18); // estimated amount is capped by maxAmountInPerUpdate
         assertLt(postPrice, prePrice);
 
         uint256 lowerBound = (prePrice * (10_000 - 30)) / 10_000;
@@ -289,19 +284,13 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 50e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 50e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
         vm.prank(bob);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: true,
-                amount: 50e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: true, amount: 50e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -320,19 +309,13 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 1e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 1e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
         vm.prank(bob);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: true,
-                amount: 1e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: true, amount: 1e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -349,10 +332,7 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 200e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 200e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -380,10 +360,7 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(carol);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 80e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 80e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
@@ -410,10 +387,7 @@ contract ScenarioProofTest is BaseTest {
         vm.prank(alice);
         clearingHouse.openPosition(
             IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false,
-                amount: 16_890e18,
-                sqrtPriceLimitX96: 0,
-                hookData: Constants.ZERO_BYTES
+                isBaseToQuote: false, amount: 16_890e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
             })
         );
 
