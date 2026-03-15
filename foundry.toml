@@ -10,6 +10,9 @@ src = "src"
 via_ir = false
 optimizer_runs = 44444444
 
+[rpc_endpoints]
+unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC_URL}"
+
 [lint]
 exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
 lint_on_build = false
