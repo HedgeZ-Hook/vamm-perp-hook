@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -32,6 +33,9 @@ import {PerpMath} from "../src/libraries/PerpMath.sol";
 contract LiquidationTest is BaseTest {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
+
+    bytes32 internal constant POSITION_LIQUIDATED_SIG =
+        keccak256("PositionLiquidated(address,address,int256,int256,uint256,bool,int256)");
 
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
@@ -231,6 +235,56 @@ contract LiquidationTest is BaseTest {
         assertLt(PerpMath.abs(positionAfter), PerpMath.abs(positionBefore));
     }
 
+    function testLiquidationEventHasCompletionFlagForFull() public {
+        vm.prank(alice);
+        vault.deposit(27e18);
+        vm.prank(alice);
+        clearingHouse.openPosition(
+            IClearingHouse.OpenPositionParams({
+                isBaseToQuote: false, amount: 80e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
+            })
+        );
+
+        priceOracle.setPriceX18(0.7e18);
+        accountBalance.setMarkPriceX18(vammPoolId, 0.7e18);
+        assertTrue(vault.isLiquidatable(alice));
+
+        vm.recordLogs();
+        vm.prank(bob);
+        clearingHouse.liquidate(alice);
+
+        (bool found, bool isFullyLiquidated, int256 remainingPositionSize) =
+            _lastPositionLiquidated(vm.getRecordedLogs());
+        assertTrue(found);
+        assertTrue(isFullyLiquidated);
+        assertEq(remainingPositionSize, 0);
+    }
+
+    function testLiquidationEventHasCompletionFlagForPartial() public {
+        vm.prank(alice);
+        vault.deposit(28e18);
+        vm.prank(alice);
+        clearingHouse.openPosition(
+            IClearingHouse.OpenPositionParams({
+                isBaseToQuote: false, amount: 200e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
+            })
+        );
+
+        priceOracle.setPriceX18(0.9e18);
+        accountBalance.setMarkPriceX18(vammPoolId, 0.9e18);
+        assertTrue(vault.isLiquidatable(alice));
+
+        vm.recordLogs();
+        vm.prank(bob);
+        clearingHouse.liquidate(alice);
+
+        (bool found, bool isFullyLiquidated, int256 remainingPositionSize) =
+            _lastPositionLiquidated(vm.getRecordedLogs());
+        assertTrue(found);
+        assertFalse(isFullyLiquidated);
+        assertTrue(remainingPositionSize != 0);
+    }
+
     function testLiquidationUpdatesFundingSnapshot() public {
         vm.prank(alice);
         vault.deposit(27e18);
@@ -359,5 +413,24 @@ contract LiquidationTest is BaseTest {
             Constants.ZERO_BYTES
         );
         vm.stopPrank();
+    }
+
+    function _lastPositionLiquidated(Vm.Log[] memory logs)
+        internal
+        view
+        returns (bool found, bool isFullyLiquidated, int256 remainingPositionSize)
+    {
+        for (uint256 i = logs.length; i > 0; i--) {
+            Vm.Log memory entry = logs[i - 1];
+            if (entry.emitter != address(clearingHouse) || entry.topics.length == 0) continue;
+            if (entry.topics[0] != POSITION_LIQUIDATED_SIG) continue;
+
+            (int256 liquidatedPositionSize, int256 realizedPnl, uint256 penalty, bool full, int256 remaining) =
+                abi.decode(entry.data, (int256, int256, uint256, bool, int256));
+            liquidatedPositionSize;
+            realizedPnl;
+            penalty;
+            return (true, full, remaining);
+        }
     }
 }

@@ -72,7 +72,9 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         address indexed liquidator,
         int256 liquidatedPositionSize,
         int256 realizedPnl,
-        uint256 penalty
+        uint256 penalty,
+        bool isFullyLiquidated,
+        int256 remainingPositionSize
     );
 
     constructor(
@@ -171,8 +173,19 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
             vault.settleBadDebt(trader);
         }
 
+        int256 remainingPositionSize = accountBalance.getTakerPositionSize(trader, vammPoolId);
+        bool isFullyLiquidated = remainingPositionSize == 0;
+
         _notifyLiquidationPriceChange(trader);
-        emit PositionLiquidated(trader, msg.sender, liquidatedPositionSize, result.realizedPnl, penalty);
+        emit PositionLiquidated(
+            trader,
+            msg.sender,
+            liquidatedPositionSize,
+            result.realizedPnl,
+            penalty,
+            isFullyLiquidated,
+            remainingPositionSize
+        );
     }
 
     function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
