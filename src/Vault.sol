@@ -24,6 +24,10 @@ import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IFundingRate} from "./interfaces/IFundingRate.sol";
 
+interface IClearingHouseLiquidationSync {
+    function syncTraderLiquidationPrice(address trader, uint256 liquidationPriceX18, bool wasLiquidated) external;
+}
+
 contract Vault is Ownable, IVault {
     using PoolIdLibrary for PoolKey;
     using PositionInfoLibrary for PositionInfo;
@@ -79,7 +83,7 @@ contract Vault is Ownable, IVault {
     );
     event Deposited(address indexed trader, uint256 amount);
     event Withdrawn(address indexed trader, uint256 amount);
-    event LiquidationPriceChange(address indexed trader, uint256 liquidationPriceX18);
+    event LiquidationPriceChange(address indexed trader, uint256 liquidationPriceX18, bool wasLiquidated);
 
     modifier onlyClearingHouse() {
         if (msg.sender != clearingHouse) revert Unauthorized(msg.sender);
@@ -136,7 +140,7 @@ contract Vault is Ownable, IVault {
         usdc.transferFrom(msg.sender, address(this), amount);
         usdcBalance[msg.sender] += int256(amount);
         emit Deposited(msg.sender, amount);
-        _emitLiquidationPriceChange(msg.sender);
+        _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function withdraw(uint256 amount) external {
@@ -149,7 +153,7 @@ contract Vault is Ownable, IVault {
         usdcBalance[msg.sender] -= int256(amount);
         usdc.transfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);
-        _emitLiquidationPriceChange(msg.sender);
+        _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function depositLP(uint256 tokenId) external {
@@ -172,7 +176,7 @@ contract Vault is Ownable, IVault {
         lpTokenIndexPlusOne[tokenId] = userLPTokenIds[msg.sender].length;
 
         emit LPDeposited(msg.sender, tokenId, liquidity);
-        _emitLiquidationPriceChange(msg.sender);
+        _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function withdrawLP(uint256 tokenId) external returns (uint256 ethAmount, uint256 usdcAmount) {
@@ -189,7 +193,7 @@ contract Vault is Ownable, IVault {
         IERC721(address(positionManager)).transferFrom(address(this), msg.sender, tokenId);
         (ethAmount, usdcAmount) = _settleVoluntaryProceeds(msg.sender, ethAmount, usdcAmount);
         emit LPWithdrawn(msg.sender, tokenId, liquidityToRemove);
-        _emitLiquidationPriceChange(msg.sender);
+        _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function decreaseLP(uint256 tokenId, uint128 liquidityToRemove)
@@ -211,7 +215,7 @@ contract Vault is Ownable, IVault {
         }
 
         emit LPDecreased(msg.sender, tokenId, liquidityToRemove, liquidityLeft);
-        _emitLiquidationPriceChange(msg.sender);
+        _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function forceLiquidateLP(address trader, uint256 usdcNeeded)
@@ -246,7 +250,7 @@ contract Vault is Ownable, IVault {
             usdcBalance[trader] += int256(usdcRecovered);
         }
 
-        _emitLiquidationPriceChange(trader);
+        _emitLiquidationPriceChange(trader, false);
     }
 
     function _forceLiquidateSinglePosition(
@@ -295,8 +299,8 @@ contract Vault is Ownable, IVault {
         }
         usdcBalance[from] -= int256(amount);
         usdcBalance[to] += int256(amount);
-        _emitLiquidationPriceChange(from);
-        if (to != from) _emitLiquidationPriceChange(to);
+        _emitLiquidationPriceChange(from, false);
+        if (to != from) _emitLiquidationPriceChange(to, false);
     }
 
     function getAccountValue(address trader) public view returns (int256 accountValue) {
@@ -358,27 +362,11 @@ contract Vault is Ownable, IVault {
     }
 
     function getLiquidationPriceX18(address trader) public view returns (uint256 liquidationPriceX18) {
-        (int256 netPositionSize, int256 totalOpenNotional, uint256 totalAbsPositionSize) =
-            _getPositionAggregates(trader);
-        if (totalAbsPositionSize == 0) return 0;
-
-        (uint256 lpEthAmount, uint256 lpUsdcAmount) = _getLPCollateralAmounts(trader);
-        int256 pendingFunding = _getPendingFundingPayment(trader);
-
-        int256 constantTerm = usdcBalance[trader] + accountBalance.getOwedRealizedPnl(trader) + totalOpenNotional
-            + int256(lpUsdcAmount) - pendingFunding;
-        int256 mmWeightedAbsSize = int256(PerpMath.mulRatio(totalAbsPositionSize, config.mmRatio()));
-        int256 priceSlope = netPositionSize + int256(lpEthAmount) - mmWeightedAbsSize;
-        if (priceSlope == 0) return 0;
-
-        int256 signedNumerator = priceSlope > 0 ? PerpMath.neg256(constantTerm) : constantTerm;
-        int256 priceX18 = PerpMath.mulDiv(signedNumerator, int256(1e18), PerpMath.abs(priceSlope));
-        if (priceX18 <= 0) return 0;
-        return uint256(priceX18);
+        liquidationPriceX18 = _getLiquidationSignal(trader);
     }
 
-    function notifyLiquidationPriceChange(address trader) external onlyClearingHouse {
-        _emitLiquidationPriceChange(trader);
+    function notifyLiquidationPriceChange(address trader, bool wasLiquidated) external onlyClearingHouse {
+        _emitLiquidationPriceChange(trader, wasLiquidated);
     }
 
     function getLiquidationState(address trader)
@@ -403,8 +391,8 @@ contract Vault is Ownable, IVault {
         uint256 badDebt = uint256(-cashBalance);
         usdcBalance[trader] = 0;
         usdcBalance[insuranceFund] -= int256(badDebt);
-        _emitLiquidationPriceChange(trader);
-        _emitLiquidationPriceChange(insuranceFund);
+        _emitLiquidationPriceChange(trader, false);
+        _emitLiquidationPriceChange(insuranceFund, false);
     }
 
     function _requireLpRemovalMargin(address trader, uint256 tokenId, uint128 liquidityToRemove) internal view {
@@ -629,7 +617,31 @@ contract Vault is Ownable, IVault {
         }
     }
 
-    function _emitLiquidationPriceChange(address trader) internal {
-        emit LiquidationPriceChange(trader, getLiquidationPriceX18(trader));
+    function _emitLiquidationPriceChange(address trader, bool wasLiquidated) internal {
+        uint256 liquidationPriceX18 = getLiquidationPriceX18(trader);
+        emit LiquidationPriceChange(trader, liquidationPriceX18, wasLiquidated);
+        if (clearingHouse == address(0)) return;
+        IClearingHouseLiquidationSync(clearingHouse)
+            .syncTraderLiquidationPrice(trader, liquidationPriceX18, wasLiquidated);
+    }
+
+    function _getLiquidationSignal(address trader) internal view returns (uint256 liquidationPriceX18) {
+        (int256 netPositionSize, int256 totalOpenNotional, uint256 totalAbsPositionSize) =
+            _getPositionAggregates(trader);
+        if (totalAbsPositionSize == 0) return 0;
+
+        (uint256 lpEthAmount, uint256 lpUsdcAmount) = _getLPCollateralAmounts(trader);
+        int256 pendingFunding = _getPendingFundingPayment(trader);
+
+        int256 constantTerm = usdcBalance[trader] + accountBalance.getOwedRealizedPnl(trader) + totalOpenNotional
+            + int256(lpUsdcAmount) - pendingFunding;
+        int256 mmWeightedAbsSize = int256(PerpMath.mulRatio(totalAbsPositionSize, config.mmRatio()));
+        int256 priceSlope = netPositionSize + int256(lpEthAmount) - mmWeightedAbsSize;
+        if (priceSlope == 0) return 0;
+
+        int256 signedNumerator = priceSlope > 0 ? PerpMath.neg256(constantTerm) : constantTerm;
+        int256 priceX18 = PerpMath.mulDiv(signedNumerator, int256(1e18), PerpMath.abs(priceSlope));
+        if (priceX18 <= 0) return 0;
+        liquidationPriceX18 = uint256(priceX18);
     }
 }

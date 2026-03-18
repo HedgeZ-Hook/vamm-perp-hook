@@ -15,5 +15,9 @@ interface IClearingHouse {
         external
         returns (int256 base, int256 quote);
 
-    function liquidate(address trader) external returns (int256 liquidatedPositionSize, uint256 penalty);
+    function liquidate(address trader)
+        external
+        returns (bool isFullyLiquidated, uint256 liquidatedPositionSize, uint256 penalty);
+
+    function syncTraderLiquidationPrice(address trader, uint256 liquidationPriceX18, bool wasLiquidated) external;
 }

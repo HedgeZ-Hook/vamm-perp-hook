@@ -342,10 +342,10 @@ contract ScenarioProofTest is BaseTest {
         int256 ifBefore = vault.usdcBalance(address(insuranceFund));
 
         vm.prank(bob);
-        (int256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
+        (, uint256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
 
         int256 partialPosAfter = accountBalance.getTakerPositionSize(alice, vammPoolId);
-        assertGt(PerpMath.abs(liquidatedSize), 0);
+        assertGt(liquidatedSize, 0);
         assertGt(PerpMath.abs(partialPosAfter), 0);
         assertLt(PerpMath.abs(partialPosAfter), PerpMath.abs(partialPosBefore));
 

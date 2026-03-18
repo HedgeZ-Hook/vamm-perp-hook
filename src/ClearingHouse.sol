@@ -17,6 +17,7 @@ import {Config} from "./Config.sol";
 import {PerpMath} from "./libraries/PerpMath.sol";
 import {IAccountBalance} from "./interfaces/IAccountBalance.sol";
 import {IClearingHouse} from "./interfaces/IClearingHouse.sol";
+import {ILiquidationTracker} from "./interfaces/ILiquidationTracker.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {IFundingRate} from "./interfaces/IFundingRate.sol";
 
@@ -32,6 +33,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
     error ZeroAmount();
     error InsufficientMargin(int256 freeCollateral);
     error VaultNotSet();
+    error NotVault(address caller);
     error NotLiquidatable(address trader);
     error NoLiquidatablePosition(address trader);
 
@@ -59,6 +61,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
     Config public immutable config;
     IVault public vault;
     IFundingRate public fundingRate;
+    ILiquidationTracker public liquidationTracker;
 
     PoolKey public vammPoolKey;
     PoolId public vammPoolId;
@@ -102,7 +105,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.modifyTakerBalance(msg.sender, vammPoolId, base, quote);
         _chargeTradeFee(msg.sender, quote);
         _enforceMargin(msg.sender, config.imRatio());
-        _notifyLiquidationPriceChange(msg.sender);
+        _notifyLiquidationPriceChange(msg.sender, false);
         emit PositionOpened(msg.sender, base, quote);
     }
 
@@ -134,7 +137,7 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.settleBalanceAndDeregister(msg.sender, vammPoolId, base, quoteForOpenNotional, realizedPnl);
         _chargeTradeFee(msg.sender, quote);
         _enforceMargin(msg.sender, config.mmRatio());
-        _notifyLiquidationPriceChange(msg.sender);
+        _notifyLiquidationPriceChange(msg.sender, false);
         emit PositionClosed(msg.sender, base, quote, realizedPnl);
     }
 
@@ -146,7 +149,20 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         fundingRate = fundingRate_;
     }
 
-    function liquidate(address trader) external returns (int256 liquidatedPositionSize, uint256 penalty) {
+    function setLiquidationTracker(ILiquidationTracker liquidationTracker_) external onlyOwner {
+        liquidationTracker = liquidationTracker_;
+    }
+
+    function syncTraderLiquidationPrice(address trader, uint256 liquidationPriceX18, bool wasLiquidated) external {
+        if (msg.sender != address(vault)) revert NotVault(msg.sender);
+        if (address(liquidationTracker) == address(0)) return;
+        liquidationTracker.updateTrader(trader, liquidationPriceX18, wasLiquidated);
+    }
+
+    function liquidate(address trader)
+        external
+        returns (bool isFullyLiquidated, uint256 liquidatedPositionSize, uint256 penalty)
+    {
         if (address(vault) == address(0)) revert VaultNotSet();
         if (!vault.isLiquidatable(trader)) revert NotLiquidatable(trader);
 
@@ -155,7 +171,8 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.updateMarkPriceX18(vammPoolId, markPriceX18);
         int256 accountValue = vault.getAccountValue(trader);
         LiquidationResult memory result = _liquidateAtMark(trader, accountValue, markPriceX18);
-        liquidatedPositionSize = result.liquidatedPositionSize;
+        int256 liquidatedPositionSizeSigned = result.liquidatedPositionSize;
+        liquidatedPositionSize = PerpMath.abs(liquidatedPositionSizeSigned);
 
         penalty = PerpMath.mulRatio(result.liquidatedNotional, config.liquidationPenaltyRatio());
         if (penalty > 0) {
@@ -174,13 +191,13 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         }
 
         int256 remainingPositionSize = accountBalance.getTakerPositionSize(trader, vammPoolId);
-        bool isFullyLiquidated = remainingPositionSize == 0;
+        isFullyLiquidated = remainingPositionSize == 0;
 
-        _notifyLiquidationPriceChange(trader);
+        _notifyLiquidationPriceChange(trader, true);
         emit PositionLiquidated(
             trader,
             msg.sender,
-            liquidatedPositionSize,
+            liquidatedPositionSizeSigned,
             result.realizedPnl,
             penalty,
             isFullyLiquidated,
@@ -335,8 +352,8 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         accountBalance.modifyOwedRealizedPnl(insuranceFund, int256(feeAmount));
     }
 
-    function _notifyLiquidationPriceChange(address trader) internal {
+    function _notifyLiquidationPriceChange(address trader, bool wasLiquidated) internal {
         if (address(vault) == address(0)) return;
-        vault.notifyLiquidationPriceChange(trader);
+        vault.notifyLiquidationPriceChange(trader, wasLiquidated);
     }
 }

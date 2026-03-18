@@ -153,9 +153,9 @@ contract LiquidationTest is BaseTest {
 
         int256 bobBefore = vault.usdcBalance(bob);
         vm.prank(bob);
-        (int256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
+        (, uint256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
 
-        assertGt(PerpMath.abs(liquidatedSize), 0);
+        assertGt(liquidatedSize, 0);
         assertGt(penalty, 0);
         assertEq(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
         assertGt(vault.usdcBalance(bob), bobBefore);

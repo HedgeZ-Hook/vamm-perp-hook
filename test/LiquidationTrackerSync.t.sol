@@ -2,15 +2,12 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {Vm} from "forge-std/Vm.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
@@ -26,13 +23,25 @@ import {Config} from "../src/Config.sol";
 import {AccountBalance} from "../src/AccountBalance.sol";
 import {ClearingHouse} from "../src/ClearingHouse.sol";
 import {Vault} from "../src/Vault.sol";
+import {ILiquidationTracker} from "../src/interfaces/ILiquidationTracker.sol";
 import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
 
-contract LiquidationPriceEventsTest is BaseTest {
-    using EasyPosm for IPositionManager;
-    using PoolIdLibrary for PoolKey;
+contract MockLiquidationTracker is ILiquidationTracker {
+    uint256 public updateCount;
+    address public lastTrader;
+    uint256 public lastLiquidationPrice;
+    bool public lastWasLiquidated;
 
-    bytes32 internal constant LIQUIDATION_PRICE_CHANGE_SIG = keccak256("LiquidationPriceChange(address,uint256,bool)");
+    function updateTrader(address trader, uint256 liquidationPrice, bool isLiquidated) external {
+        updateCount++;
+        lastTrader = trader;
+        lastLiquidationPrice = liquidationPrice;
+        lastWasLiquidated = isLiquidated;
+    }
+}
+
+contract LiquidationTrackerSyncTest is BaseTest {
+    using EasyPosm for IPositionManager;
 
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
@@ -46,10 +55,10 @@ contract LiquidationPriceEventsTest is BaseTest {
     ClearingHouse internal clearingHouse;
     MockPriceOracle internal priceOracle;
     Vault internal vault;
+    MockLiquidationTracker internal tracker;
 
     PoolKey internal vammPoolKey;
     PoolKey internal spotPoolKey;
-    PoolId internal vammPoolId;
     Currency internal baseCurrency;
     Currency internal quoteCurrency;
 
@@ -78,7 +87,6 @@ contract LiquidationPriceEventsTest is BaseTest {
 
         (Currency currency0, Currency currency1) = _orderedCurrencies(address(veth), address(vusdc));
         vammPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
-        vammPoolId = vammPoolKey.toId();
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
 
@@ -98,6 +106,7 @@ contract LiquidationPriceEventsTest is BaseTest {
             swapRouter,
             spotPoolKey
         );
+        tracker = new MockLiquidationTracker();
 
         hook.registerVAMMPool(vammPoolKey);
         hook.setVerifiedRouter(address(positionManager), true);
@@ -108,6 +117,7 @@ contract LiquidationPriceEventsTest is BaseTest {
         accountBalance.setVault(address(vault));
 
         clearingHouse.setVault(vault);
+        clearingHouse.setLiquidationTracker(tracker);
         vault.setClearingHouse(address(clearingHouse));
 
         veth.addWhitelist(address(clearingHouse));
@@ -123,15 +133,13 @@ contract LiquidationPriceEventsTest is BaseTest {
         _fundAndApproveUsdc(bob, 10_000_000e18);
     }
 
-    function testDepositAndWithdrawEmitLiquidationPriceChange() public {
-        vm.recordLogs();
+    function testSyncOnDepositAndOpenPosition() public {
         vm.prank(alice);
         vault.deposit(2_000e18);
-        (bool foundOnDeposit, uint256 liqOnDeposit, bool wasLiquidatedOnDeposit) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnDeposit);
-        assertEq(liqOnDeposit, 0);
-        assertFalse(wasLiquidatedOnDeposit);
+        assertEq(tracker.updateCount(), 1);
+        assertEq(tracker.lastTrader(), alice);
+        assertEq(tracker.lastLiquidationPrice(), 0);
+        assertFalse(tracker.lastWasLiquidated());
 
         vm.prank(alice);
         clearingHouse.openPosition(
@@ -140,70 +148,12 @@ contract LiquidationPriceEventsTest is BaseTest {
             })
         );
 
-        vm.recordLogs();
-        vm.prank(alice);
-        vault.withdraw(100e18);
-        (bool foundOnWithdraw, uint256 liqOnWithdraw, bool wasLiquidatedOnWithdraw) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnWithdraw);
-        assertEq(liqOnWithdraw, vault.getLiquidationPriceX18(alice));
-        assertFalse(wasLiquidatedOnWithdraw);
+        assertEq(tracker.lastTrader(), alice);
+        assertEq(tracker.lastLiquidationPrice(), vault.getLiquidationPriceX18(alice));
+        assertFalse(tracker.lastWasLiquidated());
     }
 
-    function testOpenAndCloseEmitLiquidationPriceChange() public {
-        vm.prank(alice);
-        vault.deposit(2_000e18);
-
-        vm.recordLogs();
-        vm.prank(alice);
-        clearingHouse.openPosition(
-            IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false, amount: 10e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
-            })
-        );
-        (bool foundOnOpen, uint256 liqOnOpen, bool wasLiquidatedOnOpen) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnOpen);
-        assertEq(liqOnOpen, vault.getLiquidationPriceX18(alice));
-        assertFalse(wasLiquidatedOnOpen);
-
-        vm.recordLogs();
-        vm.prank(alice);
-        clearingHouse.closePosition(0, 0, Constants.ZERO_BYTES);
-        (bool foundOnClose, uint256 liqOnClose, bool wasLiquidatedOnClose) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnClose);
-        assertEq(liqOnClose, vault.getLiquidationPriceX18(alice));
-        assertEq(liqOnClose, 0);
-        assertFalse(wasLiquidatedOnClose);
-    }
-
-    function testLpCollateralActionsEmitLiquidationPriceChange() public {
-        uint256 tokenId = _mintSpotFullRangeFor(alice, 2_000e18);
-        vm.prank(alice);
-        IERC721(address(positionManager)).approve(address(vault), tokenId);
-
-        vm.recordLogs();
-        vm.prank(alice);
-        vault.depositLP(tokenId);
-        (bool foundOnDepositLP, uint256 liqOnDepositLP, bool wasLiquidatedOnDepositLP) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnDepositLP);
-        assertEq(liqOnDepositLP, vault.getLiquidationPriceX18(alice));
-        assertFalse(wasLiquidatedOnDepositLP);
-
-        (,,,, uint128 liquidityBefore) = vault.lpCollaterals(tokenId);
-        vm.recordLogs();
-        vm.prank(alice);
-        vault.decreaseLP(tokenId, liquidityBefore / 2);
-        (bool foundOnDecreaseLP, uint256 liqOnDecreaseLP, bool wasLiquidatedOnDecreaseLP) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnDecreaseLP);
-        assertEq(liqOnDecreaseLP, vault.getLiquidationPriceX18(alice));
-        assertFalse(wasLiquidatedOnDecreaseLP);
-    }
-
-    function testLiquidateEmitsLiquidationPriceChange() public {
+    function testSyncMarksWasLiquidatedOnLiquidation() public {
         vm.prank(alice);
         vault.deposit(27e18);
 
@@ -217,66 +167,12 @@ contract LiquidationPriceEventsTest is BaseTest {
         priceOracle.setPriceX18(0.7e18);
         assertTrue(vault.isLiquidatable(alice));
 
-        vm.recordLogs();
         vm.prank(bob);
         clearingHouse.liquidate(alice);
-        (bool foundOnLiquidate, uint256 liqOnLiquidate, bool wasLiquidatedOnLiquidate) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(foundOnLiquidate);
-        assertEq(liqOnLiquidate, vault.getLiquidationPriceX18(alice));
-        assertEq(liqOnLiquidate, 0);
-        assertTrue(wasLiquidatedOnLiquidate);
-    }
 
-    function testMoveBalanceEmitsLiquidationPriceChangeForBothSides() public {
-        vm.prank(alice);
-        vault.deposit(500e18);
-        vm.prank(bob);
-        vault.deposit(100e18);
-
-        vm.recordLogs();
-        vm.prank(address(clearingHouse));
-        vault.moveBalance(alice, bob, 50e18);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-
-        (bool foundAlice, uint256 liqAlice, bool wasLiquidatedAlice) = _lastLiquidationPriceEvent(logs, alice);
-        (bool foundBob, uint256 liqBob, bool wasLiquidatedBob) = _lastLiquidationPriceEvent(logs, bob);
-
-        assertTrue(foundAlice);
-        assertTrue(foundBob);
-        assertEq(liqAlice, vault.getLiquidationPriceX18(alice));
-        assertEq(liqBob, vault.getLiquidationPriceX18(bob));
-        assertFalse(wasLiquidatedAlice);
-        assertFalse(wasLiquidatedBob);
-    }
-
-    function testNotifyLiquidationPriceChangeOnlyClearingHouse() public {
-        vm.expectRevert(abi.encodeWithSelector(Vault.Unauthorized.selector, address(this)));
-        vault.notifyLiquidationPriceChange(alice, false);
-
-        vm.recordLogs();
-        vm.prank(address(clearingHouse));
-        vault.notifyLiquidationPriceChange(alice, false);
-        (bool found, uint256 liquidationPriceX18, bool wasLiquidated) =
-            _lastLiquidationPriceEvent(vm.getRecordedLogs(), alice);
-        assertTrue(found);
-        assertEq(liquidationPriceX18, vault.getLiquidationPriceX18(alice));
-        assertFalse(wasLiquidated);
-    }
-
-    function _lastLiquidationPriceEvent(Vm.Log[] memory logs, address trader)
-        internal
-        view
-        returns (bool found, uint256 liquidationPriceX18, bool wasLiquidated)
-    {
-        bytes32 traderTopic = bytes32(uint256(uint160(trader)));
-        for (uint256 i = logs.length; i > 0; i--) {
-            Vm.Log memory entry = logs[i - 1];
-            if (entry.emitter != address(vault) || entry.topics.length < 2) continue;
-            if (entry.topics[0] != LIQUIDATION_PRICE_CHANGE_SIG || entry.topics[1] != traderTopic) continue;
-            (liquidationPriceX18, wasLiquidated) = abi.decode(entry.data, (uint256, bool));
-            return (true, liquidationPriceX18, wasLiquidated);
-        }
+        assertEq(tracker.lastTrader(), alice);
+        assertEq(tracker.lastLiquidationPrice(), vault.getLiquidationPriceX18(alice));
+        assertTrue(tracker.lastWasLiquidated());
     }
 
     function _allowVirtualToken(VirtualToken token) internal {
@@ -337,30 +233,5 @@ contract LiquidationPriceEventsTest is BaseTest {
             block.timestamp + 1,
             Constants.ZERO_BYTES
         );
-    }
-
-    function _mintSpotFullRangeFor(address owner, uint128 liquidityAmount) internal returns (uint256 tokenId) {
-        int24 tickLower = TickMath.minUsableTick(spotPoolKey.tickSpacing);
-        int24 tickUpper = TickMath.maxUsableTick(spotPoolKey.tickSpacing);
-        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            liquidityAmount
-        );
-
-        vm.startPrank(owner);
-        (tokenId,) = positionManager.mint(
-            spotPoolKey,
-            tickLower,
-            tickUpper,
-            liquidityAmount,
-            amount0Expected + 1,
-            amount1Expected + 1,
-            owner,
-            block.timestamp + 1,
-            Constants.ZERO_BYTES
-        );
-        vm.stopPrank();
     }
 }
