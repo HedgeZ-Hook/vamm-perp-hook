@@ -10,6 +10,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {IUniswapV4Router04} from "hookmate/interfaces/router/IUniswapV4Router04.sol";
 
@@ -23,12 +24,14 @@ contract LiquidityController is AccessControl {
     error InvalidBps(uint24 value);
     error InvalidOracle(address oracle);
     error InvalidMaxAmountInPerUpdate(uint256 amount);
+    error InvalidVammPair(address baseToken, address quoteToken);
     error VammLiquidityBelowFloor(uint128 currentLiquidity, uint128 minVammLiquidity);
     error MaxRepriceExceeded(uint256 postPriceX18, uint256 lowerBoundX18, uint256 upperBoundX18);
 
     uint256 internal constant BPS_BASE = 10_000;
     uint256 internal constant Q96 = 2 ** 96;
     uint256 internal constant Q192 = 2 ** 192;
+    uint256 internal constant PRICE_TOLERANCE_X18 = 2e7;
 
     IPoolManager public immutable poolManager;
     IUniswapV4Router04 public immutable swapRouter;
@@ -36,6 +39,9 @@ contract LiquidityController is AccessControl {
     IPriceOracle public priceOracle;
     PoolKey public vammPoolKey;
     PoolId public vammPoolId;
+    bool public vammBaseIsCurrency0;
+    address public vammBaseToken;
+    address public vammQuoteToken;
     uint32 public twapInterval;
 
     uint24 public deadbandBps;
@@ -61,13 +67,17 @@ contract LiquidityController is AccessControl {
         IUniswapV4Router04 swapRouter_,
         IPriceOracle priceOracle_,
         PoolKey memory vammPoolKey_,
+        address vammBaseToken_,
+        address vammQuoteToken_,
         uint32 twapInterval_,
         uint24 deadbandBps_,
         uint24 maxRepriceBpsPerUpdate_,
         uint256 maxAmountInPerUpdate_,
         uint128 minVammLiquidity_
     ) {
-        if (address(priceOracle_) == address(0)) revert InvalidOracle(address(priceOracle_));
+        if (address(priceOracle_) == address(0)) {
+            revert InvalidOracle(address(priceOracle_));
+        }
         if (maxAmountInPerUpdate_ == 0) revert InvalidMaxAmountInPerUpdate(maxAmountInPerUpdate_);
 
         _validateBps(deadbandBps_);
@@ -76,8 +86,16 @@ contract LiquidityController is AccessControl {
         poolManager = poolManager_;
         swapRouter = swapRouter_;
         priceOracle = priceOracle_;
+        address currency0 = Currency.unwrap(vammPoolKey_.currency0);
+        address currency1 = Currency.unwrap(vammPoolKey_.currency1);
+        bool validPair = (vammBaseToken_ == currency0 && vammQuoteToken_ == currency1)
+            || (vammBaseToken_ == currency1 && vammQuoteToken_ == currency0);
+        if (!validPair) revert InvalidVammPair(vammBaseToken_, vammQuoteToken_);
         vammPoolKey = vammPoolKey_;
         vammPoolId = vammPoolKey_.toId();
+        vammBaseToken = vammBaseToken_;
+        vammQuoteToken = vammQuoteToken_;
+        vammBaseIsCurrency0 = vammBaseToken_ == currency0;
         twapInterval = twapInterval_;
 
         deadbandBps = deadbandBps_;
@@ -120,14 +138,15 @@ contract LiquidityController is AccessControl {
     }
 
     function getOraclePriceX18() public view returns (uint256 priceX18) {
-        priceX18 = priceOracle.getIndexPrice(twapInterval);
+        priceX18 = priceOracle.latestOraclePriceE18();
     }
 
     function getVammPriceX18() public view returns (uint256 priceX18) {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(vammPoolId);
         if (sqrtPriceX96 == 0) return 0;
         uint256 priceX96 = PerpMath.formatSqrtPriceX96ToPriceX96(sqrtPriceX96);
-        priceX18 = PerpMath.formatX96ToX10_18(priceX96);
+        uint256 rawPriceX18 = PerpMath.formatX96ToX10_18(priceX96);
+        priceX18 = _rawPriceX18ToNormalizedPriceX18(rawPriceX18);
     }
 
     function isLiquidityHealthy() public view returns (bool healthy) {
@@ -153,17 +172,15 @@ contract LiquidityController is AccessControl {
             revert VammLiquidityBelowFloor(currentLiquidity, minVammLiquidity);
         }
 
-        zeroForOne = preVammPriceX18 > oraclePriceX18;
         (uint256 lowerBoundX18, uint256 upperBoundX18) = _derivePriceBounds(preVammPriceX18);
-        uint160 targetSqrtPriceX96 =
-            _deriveSqrtLimitFromBounds(preSqrtPriceX96, lowerBoundX18, upperBoundX18, zeroForOne);
-        uint256 estimatedAmountIn =
-            _estimateAmountInToTarget(currentLiquidity, preSqrtPriceX96, targetSqrtPriceX96, zeroForOne);
-        if (estimatedAmountIn == 0) {
+        uint256 targetPriceX18 = _clampPriceToBounds(oraclePriceX18, lowerBoundX18, upperBoundX18);
+        zeroForOne = _isZeroForOne(preVammPriceX18, targetPriceX18);
+        uint160 targetSqrtPriceX96 = _deriveSqrtLimitFromTarget(preSqrtPriceX96, targetPriceX18, zeroForOne);
+        usedAmountIn = _resolveUsedAmountIn(currentLiquidity, preSqrtPriceX96, targetSqrtPriceX96, zeroForOne);
+        if (usedAmountIn == 0) {
             emit Repriced(false, zeroForOne, 0, oraclePriceX18, preVammPriceX18, preVammPriceX18);
             return (false, zeroForOne, 0);
         }
-        usedAmountIn = estimatedAmountIn > maxAmountInPerUpdate ? maxAmountInPerUpdate : estimatedAmountIn;
 
         swapRouter.swapExactTokensForTokens({
             amountIn: usedAmountIn,
@@ -176,7 +193,7 @@ contract LiquidityController is AccessControl {
         });
 
         uint256 postVammPriceX18 = getVammPriceX18();
-        if (postVammPriceX18 < lowerBoundX18 || postVammPriceX18 > upperBoundX18) {
+        if (!_isWithinBounds(postVammPriceX18, lowerBoundX18, upperBoundX18)) {
             revert MaxRepriceExceeded(postVammPriceX18, lowerBoundX18, upperBoundX18);
         }
 
@@ -188,7 +205,8 @@ contract LiquidityController is AccessControl {
         (sqrtPriceX96,,,) = poolManager.getSlot0(vammPoolId);
         if (sqrtPriceX96 == 0) return (0, 0);
         uint256 priceX96 = PerpMath.formatSqrtPriceX96ToPriceX96(sqrtPriceX96);
-        priceX18 = PerpMath.formatX96ToX10_18(priceX96);
+        uint256 rawPriceX18 = PerpMath.formatX96ToX10_18(priceX96);
+        priceX18 = _rawPriceX18ToNormalizedPriceX18(rawPriceX18);
     }
 
     function _calcSpreadBps(uint256 lhsPriceX18, uint256 rhsPriceX18) internal pure returns (uint256 spreadBps) {
@@ -206,13 +224,22 @@ contract LiquidityController is AccessControl {
         upperBoundX18 = FullMath.mulDiv(currentPriceX18, BPS_BASE + bps, BPS_BASE);
     }
 
-    function _deriveSqrtLimitFromBounds(
-        uint160 currentSqrtPriceX96,
-        uint256 lowerBoundX18,
-        uint256 upperBoundX18,
-        bool zeroForOne
-    ) internal pure returns (uint160 sqrtPriceLimitX96) {
-        sqrtPriceLimitX96 = zeroForOne ? _priceX18ToSqrtPriceX96(lowerBoundX18) : _priceX18ToSqrtPriceX96(upperBoundX18);
+    function _clampPriceToBounds(uint256 targetPriceX18, uint256 lowerBoundX18, uint256 upperBoundX18)
+        internal
+        pure
+        returns (uint256 clampedPriceX18)
+    {
+        if (targetPriceX18 < lowerBoundX18) return lowerBoundX18;
+        if (targetPriceX18 > upperBoundX18) return upperBoundX18;
+        return targetPriceX18;
+    }
+
+    function _deriveSqrtLimitFromTarget(uint160 currentSqrtPriceX96, uint256 targetNormalizedPriceX18, bool zeroForOne)
+        internal
+        view
+        returns (uint160 sqrtPriceLimitX96)
+    {
+        sqrtPriceLimitX96 = _priceX18ToSqrtPriceX96(targetNormalizedPriceX18);
 
         if (zeroForOne) {
             if (sqrtPriceLimitX96 >= currentSqrtPriceX96) {
@@ -235,10 +262,63 @@ contract LiquidityController is AccessControl {
         }
     }
 
-    function _priceX18ToSqrtPriceX96(uint256 priceX18) internal pure returns (uint160 sqrtPriceX96) {
+    function _resolveUsedAmountIn(
+        uint128 currentLiquidity,
+        uint160 preSqrtPriceX96,
+        uint160 targetSqrtPriceX96,
+        bool zeroForOne
+    ) internal view returns (uint256 usedAmountIn) {
+        uint256 estimatedAmountIn = _estimateAmountInToTarget(
+            currentLiquidity, preSqrtPriceX96, targetSqrtPriceX96, zeroForOne
+        );
+        if (estimatedAmountIn == 0) return 0;
+
+        uint256 availableAmountIn = _availableAmountIn(zeroForOne);
+        usedAmountIn = Math.min(estimatedAmountIn, maxAmountInPerUpdate);
+        usedAmountIn = Math.min(usedAmountIn, availableAmountIn);
+    }
+
+    function _availableAmountIn(bool zeroForOne) internal view returns (uint256) {
+        address inputToken = Currency.unwrap(zeroForOne ? vammPoolKey.currency0 : vammPoolKey.currency1);
+        return IERC20(inputToken).balanceOf(address(this));
+    }
+
+    function _priceX18ToSqrtPriceX96(uint256 priceX18) internal view returns (uint160 sqrtPriceX96) {
         if (priceX18 == 0) return TickMath.MIN_SQRT_PRICE + 1;
-        uint256 ratioX192 = FullMath.mulDiv(priceX18, Q192, 1e18);
+        uint256 rawPriceX18 = _normalizedPriceX18ToRawPriceX18(priceX18);
+        uint256 ratioX192 = FullMath.mulDiv(rawPriceX18, Q192, 1e18);
         sqrtPriceX96 = uint160(Math.sqrt(ratioX192));
+    }
+
+    function _rawPriceX18ToNormalizedPriceX18(uint256 rawPriceX18) internal view returns (uint256 priceX18) {
+        if (rawPriceX18 == 0) return 0;
+        if (vammBaseIsCurrency0) return rawPriceX18;
+        priceX18 = FullMath.mulDiv(1e36, 1, rawPriceX18);
+    }
+
+    function _normalizedPriceX18ToRawPriceX18(uint256 priceX18) internal view returns (uint256 rawPriceX18) {
+        if (vammBaseIsCurrency0) return priceX18;
+        rawPriceX18 = FullMath.mulDiv(1e36, 1, priceX18);
+    }
+
+    function _isZeroForOne(uint256 currentNormalizedPriceX18, uint256 targetNormalizedPriceX18)
+        internal
+        view
+        returns (bool zeroForOne)
+    {
+        uint256 currentRawPriceX18 = _normalizedPriceX18ToRawPriceX18(currentNormalizedPriceX18);
+        uint256 targetRawPriceX18 = _normalizedPriceX18ToRawPriceX18(targetNormalizedPriceX18);
+        zeroForOne = currentRawPriceX18 > targetRawPriceX18;
+    }
+
+    function _isWithinBounds(uint256 priceX18, uint256 lowerBoundX18, uint256 upperBoundX18)
+        internal
+        pure
+        returns (bool)
+    {
+        bool belowLowerBound = priceX18 < lowerBoundX18 && lowerBoundX18 - priceX18 > PRICE_TOLERANCE_X18;
+        bool aboveUpperBound = priceX18 > upperBoundX18 && priceX18 - upperBoundX18 > PRICE_TOLERANCE_X18;
+        return !belowLowerBound && !aboveUpperBound;
     }
 
     function _estimateAmountInToTarget(

@@ -62,7 +62,7 @@ contract LPCollateralTest is BaseTest {
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x8888 << 144)
         );
-        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
+        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager, address(this)), flags);
         hook = PerpHook(flags);
 
         veth = new VirtualToken("Virtual ETH", "vETH");
@@ -100,7 +100,7 @@ contract LPCollateralTest is BaseTest {
             spotPoolKey
         );
 
-        hook.registerVAMMPool(vammPoolKey);
+        hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
         hook.registerSpotPool(spotPoolKey);

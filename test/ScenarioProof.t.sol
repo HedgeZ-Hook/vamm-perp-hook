@@ -73,7 +73,7 @@ contract ScenarioProofTest is BaseTest {
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0xdddd << 144)
         );
-        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
+        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager, address(this)), flags);
         hook = PerpHook(flags);
 
         veth = new VirtualToken("Virtual ETH", "vETH");
@@ -113,7 +113,7 @@ contract ScenarioProofTest is BaseTest {
         fundingRate = new FundingRate(poolManager, priceOracle, accountBalance, config);
         insuranceFund = new InsuranceFund(vault, IERC20(address(usdc)), treasury, 100e18);
 
-        hook.registerVAMMPool(vammPoolKey);
+        hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.registerSpotPool(spotPoolKey);
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
@@ -129,8 +129,9 @@ contract ScenarioProofTest is BaseTest {
         vault.setFundingRate(fundingRate);
         fundingRate.setClearingHouse(address(clearingHouse));
 
-        liquidityController =
-            new LiquidityController(poolManager, swapRouter, priceOracle, vammPoolKey, 0, 10, 30, 5e18, 1e18);
+        liquidityController = new LiquidityController(
+            poolManager, swapRouter, priceOracle, vammPoolKey, address(veth), address(vusdc), 0, 10, 30, 5e18, 1e18
+        );
         hook.setLiquidityController(address(liquidityController));
 
         veth.addWhitelist(address(clearingHouse));
@@ -257,13 +258,12 @@ contract ScenarioProofTest is BaseTest {
 
     function testScenario5_LiquidityControllerRepriceBoundAndCap() public {
         uint256 prePrice = liquidityController.getVammPriceX18();
-        priceOracle.setPriceX18((prePrice * 80) / 100); // oracle lower -> expect zeroForOne
+        priceOracle.setPriceX18((prePrice * 80) / 100);
 
-        (bool executed, bool zeroForOne, uint256 usedAmountIn) = liquidityController.updateFromOracle();
+        (bool executed,, uint256 usedAmountIn) = liquidityController.updateFromOracle();
         uint256 postPrice = liquidityController.getVammPriceX18();
 
         assertTrue(executed);
-        assertTrue(zeroForOne);
         assertEq(usedAmountIn, 5e18); // estimated amount is capped by maxAmountInPerUpdate
         assertLt(postPrice, prePrice);
 

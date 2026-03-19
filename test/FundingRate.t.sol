@@ -61,7 +61,7 @@ contract FundingRateTest is BaseTest {
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0xaaaa << 144)
         );
-        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
+        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager, address(this)), flags);
         hook = PerpHook(flags);
 
         veth = new VirtualToken("Virtual ETH", "vETH");
@@ -98,7 +98,7 @@ contract FundingRateTest is BaseTest {
         );
         fundingRate = new FundingRate(poolManager, priceOracle, accountBalance, config);
 
-        hook.registerVAMMPool(vammPoolKey);
+        hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
         hook.setClearingHouse(address(clearingHouse));

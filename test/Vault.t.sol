@@ -58,7 +58,7 @@ contract VaultTest is BaseTest {
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x7777 << 144)
         );
-        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager), flags);
+        deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager, address(this)), flags);
         hook = PerpHook(flags);
 
         veth = new VirtualToken("Virtual ETH", "vETH");
@@ -77,7 +77,7 @@ contract VaultTest is BaseTest {
         config = new Config();
         accountBalance = new AccountBalance(config);
         clearingHouse = new ClearingHouse(poolManager, accountBalance, config, vammPoolKey, baseCurrency, quoteCurrency);
-        hook.registerVAMMPool(vammPoolKey);
+        hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
         hook.setClearingHouse(address(clearingHouse));

@@ -94,7 +94,7 @@ contract FundingRate is Ownable, IFundingRate {
     }
 
     function _calculateDeltaGrowth(PoolId poolId, uint256 elapsed) internal view returns (int256 deltaGrowthX96) {
-        uint256 indexPriceX18 = priceOracle.getIndexPrice(config.twapInterval());
+        uint256 indexPriceX18 = priceOracle.latestOraclePriceE18();
         if (indexPriceX18 == 0) return 0;
 
         uint256 markPriceX18 = _getMarkPriceX18(poolId);
@@ -125,7 +125,7 @@ contract FundingRate is Ownable, IFundingRate {
         int256 deltaGrowthX96 = latestTwPremiumGrowthGlobalX96 - info.lastTwPremiumGrowthGlobalX96;
         if (deltaGrowthX96 == 0) return 0;
 
-        uint256 indexPriceX18 = priceOracle.getIndexPrice(config.twapInterval());
+        uint256 indexPriceX18 = priceOracle.latestOraclePriceE18();
         int256 positionNotionalX18 = PerpMath.mulDiv(positionSize, int256(indexPriceX18), 1e18);
         return PerpMath.mulDiv(positionNotionalX18, deltaGrowthX96, uint256(FixedPoint96.Q96));
     }

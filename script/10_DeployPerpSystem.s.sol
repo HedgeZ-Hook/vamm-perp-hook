@@ -26,15 +26,36 @@ import {FundingRate} from "../src/FundingRate.sol";
 import {LiquidityController} from "../src/LiquidityController.sol";
 import {InsuranceFund} from "../src/InsuranceFund.sol";
 import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
+import {ILiquidationTracker} from "../src/interfaces/ILiquidationTracker.sol";
 import {ManualPriceOracle} from "../src/ManualPriceOracle.sol";
 
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
+
+// ===== Perp System Deployed (Unichain Sepolia) =====
+//   Deployer: 0x91d5e66951c47FbBFaFe57C9Ff42d45c46b6044c
+//   PoolManager: 0x00B036B58a818B1BC34d502D3fE730Db729e62AC
+//   PositionManager: 0xf969Aee60879C54bAAed9F3eD26147Db216Fd664
+//   SwapRouter: 0x9cD2b0a732dd5e023a5539921e0FD1c30E198Dba
+//   USDC: 0x31d0220469e10c4E71834a79b1f276d740d3768F
+//   PerpHook: 0xAB680fAff2fb5EDd44E7dF8b4a3d698ac6b70fC0
+//   vETH: 0xa155C64e596B95799E90395C55d7BB9582E7F571
+//   vUSDC: 0x15207845fBF12Ec6dCe838141cbfe7FdfDEd1281
+//   Config: 0xD0e20b73d771543527028483c87685Ef203AB093
+//   AccountBalance: 0x9595113f5E9d772d4752b31F377C82F9da23647C
+//   ClearingHouse: 0x77e2f60F4fe6d11A34cA4aF1043A604eEfF85a7c
+//   Vault: 0xf01465d2E1ba55e5362acae22cAE4dDE59EB13e4
+//   FundingRate: 0xE29877362BE887Ca421D28Ec04796019D9316647
+//   LiquidityController: 0x67657652B6eb27cFd312eEc89e3780608B65B382
+//   InsuranceFund: 0x2a75451b45d3713152168F1D58F624e0ae482535
+//   PriceOracle: 0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be
+//   LiquidationTracker: 0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be
 
 contract DeployPerpSystemUnichainSepolia is Script {
     error InvalidChain(uint256 actual, uint256 expected);
     error InvalidUsdc(address usdc);
     error UnsupportedUsdcDecimals(uint8 decimals);
     error HookAddressMismatch(address expected, address actual);
+    error HookOwnerMismatch(address expected, address actual);
 
     struct Inputs {
         address deployer;
@@ -56,6 +77,7 @@ contract DeployPerpSystemUnichainSepolia is Script {
         uint256 lcVusdcInventory;
         address insuranceBeneficiary;
         uint256 insuranceThreshold;
+        address liquidationTracker;
     }
 
     struct Deployed {
@@ -92,7 +114,7 @@ contract DeployPerpSystemUnichainSepolia is Script {
         inp.usdc = vm.envAddress("USDC");
         if (inp.usdc == address(0)) revert InvalidUsdc(inp.usdc);
         uint8 usdcDecimals = IERC20Metadata(inp.usdc).decimals();
-        if (usdcDecimals != 18) revert UnsupportedUsdcDecimals(usdcDecimals);
+        if (usdcDecimals > 18) revert UnsupportedUsdcDecimals(usdcDecimals);
 
         inp.poolManager = IPoolManager(vm.envOr("POOL_MANAGER", UnichainSepoliaConstants.POOL_MANAGER));
         inp.positionManager = IPositionManager(vm.envOr("POSITION_MANAGER", UnichainSepoliaConstants.POSITION_MANAGER));
@@ -115,13 +137,14 @@ contract DeployPerpSystemUnichainSepolia is Script {
         inp.verifySwapRouterAsMsgSender = vm.envOr("VERIFY_SWAP_ROUTER_AS_MSG_SENDER", true);
         inp.insuranceBeneficiary = vm.envOr("INSURANCE_BENEFICIARY", inp.deployer);
         inp.insuranceThreshold = vm.envOr("INSURANCE_DISTRIBUTION_THRESHOLD", uint256(200_000e18));
+        inp.liquidationTracker = vm.envOr("LIQUIDATION_TRACKER", address(0));
     }
 
     function _deployAndWire(Inputs memory inp) internal returns (Deployed memory d) {
         IPriceOracle oracle = _resolveOracle(inp);
         d.oracle = address(oracle);
 
-        d.hook = _deployHook(inp.poolManager);
+        d.hook = _deployHook(inp.poolManager, inp.deployer);
         d.veth = new VirtualToken("Virtual ETH", "vETH");
         d.vusdc = new VirtualToken("Virtual USDC", "vUSDC");
         d.veth.mintMaximumTo(inp.deployer);
@@ -145,17 +168,7 @@ contract DeployPerpSystemUnichainSepolia is Script {
             spotPoolKey
         );
         d.fundingRate = new FundingRate(inp.poolManager, oracle, d.accountBalance, d.config);
-        d.liquidityController = new LiquidityController(
-            inp.poolManager,
-            IUniswapV4Router04(payable(inp.swapRouter)),
-            oracle,
-            vammPoolKey,
-            d.config.twapInterval(),
-            inp.deadbandBps,
-            inp.maxRepriceBpsPerUpdate,
-            inp.maxAmountInPerUpdate,
-            inp.minVammLiquidity
-        );
+        d.liquidityController = _deployLiquidityController(inp, oracle, vammPoolKey, d.config, d.veth, d.vusdc);
         d.insuranceFund = new InsuranceFund(d.vault, IERC20(inp.usdc), inp.insuranceBeneficiary, inp.insuranceThreshold);
 
         _wireContracts(inp, d, vammPoolKey, spotPoolKey, oracle);
@@ -170,17 +183,49 @@ contract DeployPerpSystemUnichainSepolia is Script {
         return IPriceOracle(inp.oracleAddress);
     }
 
-    function _deployHook(IPoolManager poolManager) internal returns (PerpHook hook) {
+    function _deployLiquidityController(
+        Inputs memory inp,
+        IPriceOracle oracle,
+        PoolKey memory vammPoolKey,
+        Config config,
+        VirtualToken veth,
+        VirtualToken vusdc
+    ) internal returns (LiquidityController controller) {
+        IPoolManager poolManager = inp.poolManager;
+        IUniswapV4Router04 router = IUniswapV4Router04(payable(inp.swapRouter));
+        uint32 twapInterval = config.twapInterval();
+        uint24 deadbandBps = inp.deadbandBps;
+        uint24 maxRepriceBpsPerUpdate = inp.maxRepriceBpsPerUpdate;
+        uint256 maxAmountInPerUpdate = inp.maxAmountInPerUpdate;
+        uint128 minVammLiquidity = inp.minVammLiquidity;
+
+        controller = new LiquidityController(
+            poolManager,
+            router,
+            oracle,
+            vammPoolKey,
+            address(veth),
+            address(vusdc),
+            twapInterval,
+            deadbandBps,
+            maxRepriceBpsPerUpdate,
+            maxAmountInPerUpdate,
+            minVammLiquidity
+        );
+    }
+
+    function _deployHook(IPoolManager poolManager, address initialOwner) internal returns (PerpHook hook) {
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                 | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
                 | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
         );
-        bytes memory constructorArgs = abi.encode(poolManager);
+        bytes memory constructorArgs = abi.encode(poolManager, initialOwner);
         (address expectedHook, bytes32 salt) =
             HookMiner.find(CREATE2_FACTORY, flags, type(PerpHook).creationCode, constructorArgs);
-        hook = new PerpHook{salt: salt}(poolManager);
+        hook = new PerpHook{salt: salt}(poolManager, initialOwner);
         if (address(hook) != expectedHook) revert HookAddressMismatch(expectedHook, address(hook));
+        if (hook.owner() != initialOwner) revert HookOwnerMismatch(initialOwner, hook.owner());
     }
 
     function _buildPoolKeys(PerpHook hook, VirtualToken veth, VirtualToken vusdc, address usdc)
@@ -214,7 +259,7 @@ contract DeployPerpSystemUnichainSepolia is Script {
         PoolKey memory spotPoolKey,
         IPriceOracle oracle
     ) internal {
-        d.hook.registerVAMMPool(vammPoolKey);
+        d.hook.registerVAMMPool(vammPoolKey, address(d.veth), address(d.vusdc));
         d.hook.registerSpotPool(spotPoolKey);
         d.hook.setClearingHouse(address(d.clearingHouse));
         d.hook.setPriceOracle(oracle, d.config.twapInterval());
@@ -228,6 +273,9 @@ contract DeployPerpSystemUnichainSepolia is Script {
         d.accountBalance.setVault(address(d.vault));
         d.clearingHouse.setVault(d.vault);
         d.clearingHouse.setFundingRate(d.fundingRate);
+        if (inp.liquidationTracker != address(0)) {
+            d.clearingHouse.setLiquidationTracker(ILiquidationTracker(inp.liquidationTracker));
+        }
         d.vault.setClearingHouse(address(d.clearingHouse));
         d.vault.setFundingRate(d.fundingRate);
         d.vault.setInsuranceFund(address(d.insuranceFund));
@@ -303,6 +351,7 @@ contract DeployPerpSystemUnichainSepolia is Script {
         console2.log("LiquidityController:", address(d.liquidityController));
         console2.log("InsuranceFund:", address(d.insuranceFund));
         console2.log("PriceOracle:", d.oracle);
+        console2.log("LiquidationTracker:", inp.liquidationTracker);
         if (!inp.verifySwapRouterAsMsgSender) {
             console2.log("WARN: swap router is not verified as msgSender; LiquidityController cannot swap vAMM.");
         }

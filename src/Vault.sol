@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -42,6 +43,7 @@ contract Vault is Ownable, IVault {
     error NativeTransferFailed(address to, uint256 amount);
     error InsufficientInternalBalance(address trader, int256 balance, uint256 requestedAmount);
     error InvalidForcedSwapSlippageRatio(uint24 ratio);
+    error UnsupportedUsdcDecimals(uint8 decimals);
 
     struct LPCollateral {
         uint256 tokenId;
@@ -54,6 +56,8 @@ contract Vault is Ownable, IVault {
     IAccountBalance public immutable accountBalance;
     Config public immutable config;
     IERC20 public immutable usdc;
+    uint8 public immutable usdcDecimals;
+    uint256 internal immutable usdcScaleTo1e18;
     IPriceOracle public immutable priceOracle;
     IPoolManager public immutable poolManager;
     IPositionManager public immutable positionManager;
@@ -103,6 +107,9 @@ contract Vault is Ownable, IVault {
         accountBalance = accountBalance_;
         config = config_;
         usdc = usdc_;
+        usdcDecimals = IERC20Metadata(address(usdc_)).decimals();
+        if (usdcDecimals > 18) revert UnsupportedUsdcDecimals(usdcDecimals);
+        usdcScaleTo1e18 = 10 ** (18 - usdcDecimals);
         priceOracle = priceOracle_;
         poolManager = poolManager_;
         positionManager = positionManager_;
@@ -138,19 +145,20 @@ contract Vault is Ownable, IVault {
 
     function deposit(uint256 amount) external {
         usdc.transferFrom(msg.sender, address(this), amount);
-        usdcBalance[msg.sender] += int256(amount);
+        usdcBalance[msg.sender] += int256(_toUsdcX18(amount));
         emit Deposited(msg.sender, amount);
         _emitLiquidationPriceChange(msg.sender, false);
     }
 
     function withdraw(uint256 amount) external {
         _settleOwedRealizedPnl(msg.sender);
+        uint256 amountX18 = _toUsdcX18(amount);
         int256 freeCollateral = getFreeCollateral(msg.sender);
-        if (freeCollateral < int256(amount)) revert InsufficientFreeCollateral(freeCollateral, amount);
-        if (usdcBalance[msg.sender] < int256(amount)) {
-            revert InsufficientInternalBalance(msg.sender, usdcBalance[msg.sender], amount);
+        if (freeCollateral < int256(amountX18)) revert InsufficientFreeCollateral(freeCollateral, amount);
+        if (usdcBalance[msg.sender] < int256(amountX18)) {
+            revert InsufficientInternalBalance(msg.sender, usdcBalance[msg.sender], amountX18);
         }
-        usdcBalance[msg.sender] -= int256(amount);
+        usdcBalance[msg.sender] -= int256(amountX18);
         usdc.transfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);
         _emitLiquidationPriceChange(msg.sender, false);
@@ -267,12 +275,11 @@ contract Vault is Ownable, IVault {
         uint128 currentLiquidity = lp.liquidity;
         uint128 liquidityToRemove = _estimateLiquidityToRemove(currentLiquidity, lpValue, usdcRemaining);
 
-        (uint256 ethReceived, uint256 usdcReceived) = _removeLiquidityFromPosition(tokenId, liquidityToRemove);
-        uint256 usdcFromSwap;
-        if (usdcReceived < usdcRemaining) {
-            usdcFromSwap = _swapETHtoUSDC(ethReceived, usdcRemaining - usdcReceived, false);
+        (uint256 ethReceived, uint256 usdcReceivedRaw) = _removeLiquidityFromPosition(tokenId, liquidityToRemove);
+        recovered = _toUsdcX18(usdcReceivedRaw);
+        if (recovered < usdcRemaining) {
+            recovered += _swapETHtoUSDC(ethReceived, usdcRemaining - recovered, false);
         }
-        recovered = usdcReceived + usdcFromSwap;
 
         removedFully = liquidityToRemove >= currentLiquidity;
         _updateCollateralAfterRemoval(tokenId, liquidityToRemove);
@@ -352,7 +359,7 @@ contract Vault is Ownable, IVault {
     }
 
     function getMarkPriceX18() public view returns (uint256 priceX18) {
-        return priceOracle.getIndexPrice(config.twapInterval());
+        return priceOracle.latestOraclePriceE18();
     }
 
     function isLiquidatable(address trader) public view returns (bool) {
@@ -448,20 +455,21 @@ contract Vault is Ownable, IVault {
     {
         if (ethAmount == 0) return 0;
         if (poolManager.getLiquidity(spotPoolId) == 0) return 0;
-        uint256 usdcBefore = usdc.balanceOf(address(this));
-        uint256 expectedUsdcOut = Math.mulDiv(ethAmount, getMarkPriceX18(), 1e18);
-        uint256 minUsdcOut = Math.mulDiv(expectedUsdcOut, uint256(1e6) - forcedSwapSlippageRatio, 1e6);
-        if (requiredUsdcOut > 0 && minUsdcOut > requiredUsdcOut) {
-            minUsdcOut = requiredUsdcOut;
+        uint256 usdcBeforeRaw = usdc.balanceOf(address(this));
+        uint256 expectedUsdcOutX18 = Math.mulDiv(ethAmount, getMarkPriceX18(), 1e18);
+        uint256 minUsdcOutX18 = Math.mulDiv(expectedUsdcOutX18, uint256(1e6) - forcedSwapSlippageRatio, 1e6);
+        if (requiredUsdcOut > 0 && minUsdcOutX18 > requiredUsdcOut) {
+            minUsdcOutX18 = requiredUsdcOut;
         }
+        uint256 minUsdcOutRaw = _fromUsdcX18(minUsdcOutX18);
         bool zeroForOne = spotEthIsCurrency0;
         if (strictMinOut) {
             swapRouter.swapExactTokensForTokens{value: ethAmount}(
-                ethAmount, minUsdcOut, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
+                ethAmount, minUsdcOutRaw, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
             );
         } else {
             try swapRouter.swapExactTokensForTokens{value: ethAmount}(
-                ethAmount, minUsdcOut, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
+                ethAmount, minUsdcOutRaw, zeroForOne, spotPoolKey, bytes(""), address(this), block.timestamp + 1
             ) {}
             catch {
                 swapRouter.swapExactTokensForTokens{value: ethAmount}(
@@ -469,32 +477,34 @@ contract Vault is Ownable, IVault {
                 );
             }
         }
-        return usdc.balanceOf(address(this)) - usdcBefore;
+        return _toUsdcX18(usdc.balanceOf(address(this)) - usdcBeforeRaw);
     }
 
     function _settleVoluntaryProceeds(address trader, uint256 ethAmount, uint256 usdcAmount)
         internal
         returns (uint256 ethReturned, uint256 usdcReturned)
     {
+        uint256 usdcAmountX18 = _toUsdcX18(usdcAmount);
         int256 netCashBalance = getNetCashBalance(trader);
         if (netCashBalance < 0) {
             uint256 usdcDebt = uint256(-netCashBalance);
             uint256 usdcFromSwap;
-            if (usdcAmount < usdcDebt) {
-                usdcFromSwap = _swapETHtoUSDC(ethAmount, usdcDebt - usdcAmount, true);
+            if (usdcAmountX18 < usdcDebt) {
+                usdcFromSwap = _swapETHtoUSDC(ethAmount, usdcDebt - usdcAmountX18, true);
             }
-            uint256 totalUsdc = usdcAmount + usdcFromSwap;
+            uint256 totalUsdcX18 = usdcAmountX18 + usdcFromSwap;
 
-            uint256 debtRepayment = totalUsdc > usdcDebt ? usdcDebt : totalUsdc;
+            uint256 debtRepayment = totalUsdcX18 > usdcDebt ? usdcDebt : totalUsdcX18;
             if (debtRepayment > 0) {
                 usdcBalance[trader] += int256(debtRepayment);
             }
 
-            uint256 surplus = totalUsdc - debtRepayment;
-            if (surplus > 0) {
-                usdc.transfer(trader, surplus);
+            uint256 surplusX18 = totalUsdcX18 - debtRepayment;
+            uint256 surplusRaw = _fromUsdcX18(surplusX18);
+            if (surplusRaw > 0) {
+                usdc.transfer(trader, surplusRaw);
             }
-            return (0, surplus);
+            return (0, surplusRaw);
         }
 
         if (ethAmount > 0) _transferNative(trader, ethAmount);
@@ -545,7 +555,7 @@ contract Vault is Ownable, IVault {
         returns (uint256 valueX18)
     {
         (valueX18,,) = LPValuation.getLPValue(
-            sqrtPriceX96, lp.tickLower, lp.tickUpper, lp.liquidity, markPriceX18, spotEthIsCurrency0
+            sqrtPriceX96, lp.tickLower, lp.tickUpper, lp.liquidity, markPriceX18, spotEthIsCurrency0, usdcDecimals
         );
     }
 
@@ -610,11 +620,22 @@ contract Vault is Ownable, IVault {
         for (uint256 i = 0; i < len; i++) {
             LPCollateral storage lp = lpCollaterals[tokenIds[i]];
             if (lp.liquidity == 0) continue;
-            (, uint256 ethAmount, uint256 usdcAmount) =
-                LPValuation.getLPValue(sqrtPriceX96, lp.tickLower, lp.tickUpper, lp.liquidity, 1e18, spotEthIsCurrency0);
+            (, uint256 ethAmount, uint256 usdcAmount) = LPValuation.getLPValue(
+                sqrtPriceX96, lp.tickLower, lp.tickUpper, lp.liquidity, 1e18, spotEthIsCurrency0, usdcDecimals
+            );
             totalEthAmount += ethAmount;
             totalUsdcAmount += usdcAmount;
         }
+    }
+
+    function _toUsdcX18(uint256 usdcRaw) internal view returns (uint256 usdcX18) {
+        if (usdcScaleTo1e18 == 1) return usdcRaw;
+        usdcX18 = usdcRaw * usdcScaleTo1e18;
+    }
+
+    function _fromUsdcX18(uint256 usdcX18) internal view returns (uint256 usdcRaw) {
+        if (usdcScaleTo1e18 == 1) return usdcX18;
+        usdcRaw = usdcX18 / usdcScaleTo1e18;
     }
 
     function _emitLiquidationPriceChange(address trader, bool wasLiquidated) internal {

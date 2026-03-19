@@ -6,14 +6,18 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 library LPValuation {
+    error UnsupportedQuoteDecimals(uint8 quoteDecimals);
+
     function getLPValue(
         uint160 sqrtPriceX96,
         int24 tickLower,
         int24 tickUpper,
         uint128 liquidity,
         uint256 ethPriceX18,
-        bool ethIsToken0
+        bool ethIsToken0,
+        uint8 quoteDecimals
     ) internal pure returns (uint256 valueX18, uint256 ethAmount, uint256 usdcAmount) {
+        if (quoteDecimals > 18) revert UnsupportedQuoteDecimals(quoteDecimals);
         (uint160 sqrtPriceAX96, uint160 sqrtPriceBX96) =
             (TickMath.getSqrtPriceAtTick(tickLower), TickMath.getSqrtPriceAtTick(tickUpper));
         (uint256 amount0, uint256 amount1) =
@@ -25,7 +29,9 @@ library LPValuation {
             ethAmount = amount1;
             usdcAmount = amount0;
         }
-        valueX18 = FullMath.mulDiv(ethAmount, ethPriceX18, 1e18) + usdcAmount;
+        uint256 usdcAmountX18 = quoteDecimals == 18 ? usdcAmount : usdcAmount * (10 ** (18 - quoteDecimals));
+        valueX18 = FullMath.mulDiv(ethAmount, ethPriceX18, 1e18) + usdcAmountX18;
+        usdcAmount = usdcAmountX18;
     }
 
     function getAmountsForLiquidity(

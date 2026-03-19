@@ -50,7 +50,7 @@ contract PerpHookTest is BaseTest {
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
             ) ^ (0x5555 << 144)
         );
-        bytes memory constructorArgs = abi.encode(poolManager);
+        bytes memory constructorArgs = abi.encode(poolManager, address(this));
         deployCodeTo("PerpHook.sol:PerpHook", constructorArgs, flags);
         hook = PerpHook(flags);
 
@@ -72,7 +72,7 @@ contract PerpHookTest is BaseTest {
         poolManager.initialize(vammPoolKey, Constants.SQRT_PRICE_1_1);
 
         hook.registerSpotPool(spotPoolKey);
-        hook.registerVAMMPool(vammPoolKey);
+        hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
         hook.setClearingHouse(address(this));

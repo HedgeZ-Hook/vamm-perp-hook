@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -11,6 +12,7 @@ import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
@@ -31,14 +33,22 @@ contract PerpHook is BaseHook, Ownable {
     error InvalidSizeRefQuote(uint256 sizeRefQuote);
     error InvalidFeePips(uint24 feePips);
     error RouterDoesNotImplementMsgSender(address router);
+    error UnsupportedSpotQuoteDecimals(uint8 decimals);
+    error InvalidVammPair(address baseToken, address quoteToken);
 
     PoolId public spotPoolId;
     PoolId public vammPoolId;
+    bool public vammBaseIsCurrency0;
     address public clearingHouse;
     address public liquidityController;
+    address public vammBaseToken;
+    address public vammQuoteToken;
     mapping(address => bool) public verifiedRouters;
     IPriceOracle public priceOracle;
     uint32 public twapInterval;
+    uint8 public spotBaseDecimals = 18;
+    uint8 public spotQuoteDecimals = 18;
+    uint256 public spotQuoteScaleTo1e18 = 1;
 
     uint24 public minFeeBps = 2;
     uint24 public baseFeeBps = 6;
@@ -60,7 +70,7 @@ contract PerpHook is BaseHook, Ownable {
     event SpotVolEmaUpdated(uint24 previousEmaBps, uint24 newEmaBps, uint24 instantMoveBps);
     event SpotFeeOverrideApplied(address indexed sender, uint24 feePips);
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) Ownable(msg.sender) {}
+    constructor(IPoolManager _poolManager, address initialOwner) BaseHook(_poolManager) Ownable(initialOwner) {}
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -82,12 +92,42 @@ contract PerpHook is BaseHook, Ownable {
     }
 
     function registerSpotPool(PoolKey calldata key) external onlyOwner {
+        address currency0 = Currency.unwrap(key.currency0);
+        address currency1 = Currency.unwrap(key.currency1);
+        address baseToken;
+        address quoteToken;
+        if (currency0 == address(0)) {
+            baseToken = currency0;
+            quoteToken = currency1;
+        } else if (currency1 == address(0)) {
+            baseToken = currency1;
+            quoteToken = currency0;
+        } else {
+            baseToken = currency0;
+            quoteToken = currency1;
+        }
+
+        uint8 baseDecimals = baseToken == address(0) ? 18 : IERC20Metadata(baseToken).decimals();
+        uint8 quoteDecimals = quoteToken == address(0) ? 18 : IERC20Metadata(quoteToken).decimals();
+        if (quoteDecimals > 18) revert UnsupportedSpotQuoteDecimals(quoteDecimals);
+        spotBaseDecimals = baseDecimals;
+        spotQuoteDecimals = quoteDecimals;
+        spotQuoteScaleTo1e18 = 10 ** (18 - quoteDecimals);
         spotPoolId = key.toId();
-        lastSpotPriceX18 = _poolPriceX18(spotPoolId);
+        lastSpotPriceX18 = _poolPriceX18(spotPoolId, spotBaseDecimals, spotQuoteDecimals);
     }
 
-    function registerVAMMPool(PoolKey calldata key) external onlyOwner {
+    function registerVAMMPool(PoolKey calldata key, address baseToken, address quoteToken) external onlyOwner {
+        address currency0 = Currency.unwrap(key.currency0);
+        address currency1 = Currency.unwrap(key.currency1);
+        bool validPair =
+            (baseToken == currency0 && quoteToken == currency1) || (baseToken == currency1 && quoteToken == currency0);
+        if (!validPair) revert InvalidVammPair(baseToken, quoteToken);
+
         vammPoolId = key.toId();
+        vammBaseToken = baseToken;
+        vammQuoteToken = quoteToken;
+        vammBaseIsCurrency0 = baseToken == currency0;
     }
 
     function setClearingHouse(address clearingHouse_) external onlyOwner {
@@ -131,15 +171,15 @@ contract PerpHook is BaseHook, Ownable {
     }
 
     function getSpotPriceX18() external view returns (uint256) {
-        return _poolPriceX18(spotPoolId);
+        return _poolPriceX18(spotPoolId, spotBaseDecimals, spotQuoteDecimals);
     }
 
     function getVammPriceX18() external view returns (uint256) {
-        return _poolPriceX18(vammPoolId);
+        return _vammPriceX18();
     }
 
     function previewSpotFeePips(uint256 quoteNotional) external view returns (uint24 feePips) {
-        uint256 spotPriceX18 = _poolPriceX18(spotPoolId);
+        uint256 spotPriceX18 = _poolPriceX18(spotPoolId, spotBaseDecimals, spotQuoteDecimals);
         uint256 oraclePriceX18 = _getOraclePriceOrSpot(spotPriceX18);
         feePips = _computeSpotFeePips(quoteNotional, spotPriceX18, oraclePriceX18);
     }
@@ -161,7 +201,7 @@ contract PerpHook is BaseHook, Ownable {
         }
 
         if (PoolId.unwrap(poolId) == PoolId.unwrap(spotPoolId)) {
-            uint256 spotPriceX18 = _poolPriceX18(spotPoolId);
+            uint256 spotPriceX18 = _poolPriceX18(spotPoolId, spotBaseDecimals, spotQuoteDecimals);
             uint256 oraclePriceX18 = _getOraclePriceOrSpot(spotPriceX18);
             uint256 quoteNotional = _deriveQuoteNotional(params, spotPriceX18);
             uint24 feePips = _computeSpotFeePips(quoteNotional, spotPriceX18, oraclePriceX18);
@@ -186,7 +226,7 @@ contract PerpHook is BaseHook, Ownable {
         if (PoolId.unwrap(poolId) == PoolId.unwrap(vammPoolId)) {
             emit VammSwapExecuted(sender, delta);
         } else if (PoolId.unwrap(poolId) == PoolId.unwrap(spotPoolId)) {
-            _updateSpotVolEma(_poolPriceX18(spotPoolId));
+            _updateSpotVolEma(_poolPriceX18(spotPoolId, spotBaseDecimals, spotQuoteDecimals));
         }
         return (BaseHook.afterSwap.selector, 0);
     }
@@ -250,16 +290,28 @@ contract PerpHook is BaseHook, Ownable {
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
-    function _poolPriceX18(PoolId poolId) internal view returns (uint256 priceX18) {
+    function _poolPriceX18(PoolId poolId, uint8 baseDecimals, uint8 quoteDecimals)
+        internal
+        view
+        returns (uint256 priceX18)
+    {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
         if (sqrtPriceX96 == 0) return 0;
         uint256 priceX96 = PerpMath.formatSqrtPriceX96ToPriceX96(sqrtPriceX96);
-        priceX18 = PerpMath.formatX96ToX10_18(priceX96);
+        uint256 rawRatioX18 = PerpMath.formatX96ToX10_18(priceX96);
+        priceX18 = FullMath.mulDiv(rawRatioX18, 10 ** baseDecimals, 10 ** quoteDecimals);
+    }
+
+    function _vammPriceX18() internal view returns (uint256 priceX18) {
+        uint256 rawPriceX18 = _poolPriceX18(vammPoolId, 18, 18);
+        if (rawPriceX18 == 0) return 0;
+        if (vammBaseIsCurrency0) return rawPriceX18;
+        return FullMath.mulDiv(1e36, 1, rawPriceX18);
     }
 
     function _getOraclePriceOrSpot(uint256 spotPriceX18) internal view returns (uint256 oraclePriceX18) {
         if (address(priceOracle) == address(0)) return spotPriceX18;
-        oraclePriceX18 = priceOracle.getIndexPrice(twapInterval);
+        oraclePriceX18 = priceOracle.latestOraclePriceE18();
         if (oraclePriceX18 == 0) return spotPriceX18;
     }
 
@@ -278,7 +330,7 @@ contract PerpHook is BaseHook, Ownable {
 
     function _deriveQuoteNotional(SwapParams calldata params, uint256 spotPriceX18)
         internal
-        pure
+        view
         returns (uint256 quoteNotional)
     {
         uint256 absAmountSpecified =
@@ -288,12 +340,17 @@ contract PerpHook is BaseHook, Ownable {
         if (params.zeroForOne) {
             quoteNotional = params.amountSpecified < 0
                 ? FullMath.mulDiv(absAmountSpecified, spotPriceX18, 1e18)
-                : absAmountSpecified;
+                : _toSpotQuoteX18(absAmountSpecified);
         } else {
             quoteNotional = params.amountSpecified < 0
-                ? absAmountSpecified
+                ? _toSpotQuoteX18(absAmountSpecified)
                 : FullMath.mulDiv(absAmountSpecified, spotPriceX18, 1e18);
         }
+    }
+
+    function _toSpotQuoteX18(uint256 quoteRaw) internal view returns (uint256 quoteX18) {
+        if (spotQuoteScaleTo1e18 == 1) return quoteRaw;
+        quoteX18 = quoteRaw * spotQuoteScaleTo1e18;
     }
 
     function _calcSpreadBps(uint256 lhsPriceX18, uint256 rhsPriceX18) internal pure returns (uint24 spreadBps) {

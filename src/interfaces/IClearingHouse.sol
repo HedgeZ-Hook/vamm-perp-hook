@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+
 interface IClearingHouse {
     struct OpenPositionParams {
         bool isBaseToQuote;
@@ -20,4 +23,8 @@ interface IClearingHouse {
         returns (bool isFullyLiquidated, uint256 liquidatedPositionSize, uint256 penalty);
 
     function syncTraderLiquidationPrice(address trader, uint256 liquidationPriceX18, bool wasLiquidated) external;
+
+    function poolManager() external view returns (IPoolManager);
+
+    function vammPoolId() external view returns (PoolId);
 }
