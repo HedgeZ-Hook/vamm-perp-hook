@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -73,20 +74,23 @@ contract InspectSystemStateUnichainSepolia is Script {
             inp.deployer = vm.addr(vm.envUint("PRIVATE_KEY"));
         }
         inp.trader = vm.envOr("INSPECT_TRADER", inp.deployer);
-        inp.usdc = IERC20(vm.envAddress("USDC"));
-        inp.poolManager = IPoolManager(vm.envOr("POOL_MANAGER", UnichainSepoliaConstants.POOL_MANAGER));
-        inp.positionManager = IPositionManager(vm.envOr("POSITION_MANAGER", UnichainSepoliaConstants.POSITION_MANAGER));
-
-        inp.hook = PerpHook(vm.envAddress("PERP_HOOK"));
-        inp.veth = VirtualToken(vm.envAddress("VETH"));
-        inp.vusdc = VirtualToken(vm.envAddress("VUSDC"));
-        inp.config = Config(vm.envAddress("CONFIG"));
-        inp.accountBalance = AccountBalance(vm.envAddress("ACCOUNT_BALANCE"));
         inp.clearingHouse = ClearingHouse(vm.envAddress("CLEARING_HOUSE"));
-        inp.vault = Vault(payable(vm.envAddress("VAULT")));
-        inp.fundingRate = FundingRate(vm.envAddress("FUNDING_RATE"));
-        inp.liquidityController = LiquidityController(vm.envAddress("LIQUIDITY_CONTROLLER"));
-        inp.insuranceFund = InsuranceFund(vm.envAddress("INSURANCE_FUND"));
+        inp.vault = Vault(payable(address(inp.clearingHouse.vault())));
+        inp.accountBalance = AccountBalance(address(inp.clearingHouse.accountBalance()));
+        inp.fundingRate = FundingRate(address(inp.clearingHouse.fundingRate()));
+        inp.config = inp.accountBalance.config();
+        inp.poolManager = inp.clearingHouse.poolManager();
+        inp.positionManager = inp.vault.positionManager();
+        inp.usdc = inp.vault.usdc();
+
+        (,,,, IHooks vammHooks) = inp.clearingHouse.vammPoolKey();
+        address hookAddress = vm.envOr("PERP_HOOK", address(vammHooks));
+        inp.hook = PerpHook(hookAddress);
+
+        inp.veth = VirtualToken(Currency.unwrap(inp.clearingHouse.baseCurrency()));
+        inp.vusdc = VirtualToken(Currency.unwrap(inp.clearingHouse.quoteCurrency()));
+        inp.liquidityController = LiquidityController(inp.hook.liquidityController());
+        inp.insuranceFund = InsuranceFund(inp.vault.insuranceFund());
 
         inp.vammTokenId = vm.envOr("INSPECT_VAMM_TOKEN_ID", uint256(0));
         inp.spotTokenId = vm.envOr("INSPECT_SPOT_TOKEN_ID", uint256(0));
