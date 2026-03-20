@@ -1,5 +1,60 @@
 # HedgedZ — LP-Native Perpetual Trading on Unichain
 
+## Judge Quick Check (Updated)
+
+### Live Deployment (Unichain Sepolia)
+
+> Network: `Unichain Sepolia` (chainId `1301`)
+
+| Component | Address |
+|---|---|
+| Deployer | `0x91d5e66951c47FbBFaFe57C9Ff42d45c46b6044c` |
+| PoolManager | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
+| PositionManager | `0xf969Aee60879C54bAAed9F3eD26147Db216Fd664` |
+| SwapRouter | `0x9cD2b0a732dd5e023a5539921e0FD1c30E198Dba` |
+| USDC | `0x31d0220469e10c4E71834a79b1f276d740d3768F` |
+| PerpHook | `0x67592e635186d65c4e9543691ba78fD4295c0Fc0` |
+| vETH | `0x067a34AD7F20aa0e0A5c2627e4288e34B1182c8E` |
+| vUSDC | `0xa262a8fa5C50216458b65Ca20803f0bC5019FA75` |
+| Config | `0x8F7a9a56CA8a8B4832cdCC78e2fe30B87303eD8B` |
+| AccountBalance | `0x98F0D3b07705AA97990622f40526beb2A759badB` |
+| ClearingHouse | `0x86E3e57eb57B0932EDf2Cf8c1EC2FF573259df17` |
+| Vault | `0x5d929A1f25486e455137eD0070E95492b8fd4A73` |
+| FundingRate | `0xd1a96b65aD5204685075E3740346FF6E493aB85F` |
+| LiquidityController | `0xE1c1BeE251D56233F558403bA378E7AdBcA380D1` |
+| InsuranceFund | `0x5934f5EF68bD3aAFBe526E4851e1e6774595a6A7` |
+| PriceOracle | `0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be` |
+| LiquidationTracker | `0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be` |
+
+### Minimal Repro Flow (for judges)
+
+```bash
+# 1) Inspect full system state
+forge script 'script/16_InspectSystemState.s.sol:InspectSystemStateUnichainSepolia' \
+  --rpc-url "$UNICHAIN_SEPOLIA_RPC_URL"
+
+# 2) Inspect LP trader account state (human-readable)
+INSPECT_TRADER=0x91d5e66951c47FbBFaFe57C9Ff42d45c46b6044c \
+forge script 'script/29_InspectLpAccountState.s.sol:InspectLpAccountStateUnichainSepolia' \
+  --rpc-url "$UNICHAIN_SEPOLIA_RPC_URL"
+
+# 3) Trigger manual liquidation (when account is liquidatable)
+LIQUIDATE_TRADER=0x91d5e66951c47FbBFaFe57C9Ff42d45c46b6044c \
+forge script 'script/31_LiquidateTrader.s.sol:LiquidateTraderUnichainSepolia' \
+  --rpc-url "$UNICHAIN_SEPOLIA_RPC_URL" \
+  --broadcast
+```
+
+### Current Notes (important)
+
+- LP NFT collateral flow: `depositLP`/`withdrawLP` on `Vault`.
+- LP-backed perp flow: `script/21_OpenLpPerpPosition` + `script/30_ClosePerpPositionWithSnapshot`.
+- Vault now includes insurance backstop pull path via `InsuranceFund.provideVaultLiquidity(...)`.
+
+---
+
+## Full Project Description (Original)
+
 HedgedZ is a Uniswap v4 Hook that turns LP positions into margin collateral for perpetual trading. Instead of withdrawing liquidity, LPs use their inventory value to open leveraged long/short positions via a virtual AMM engine — earning swap fees and trading PnL simultaneously.
 
 ---
