@@ -9,6 +9,7 @@ import {IVault} from "./interfaces/IVault.sol";
 
 contract InsuranceFund is Ownable {
     error UnsupportedUsdcDecimals(uint8 decimals);
+    error UnauthorizedCaller(address caller);
 
     IVault public immutable vault;
     IERC20 public immutable usdc;
@@ -17,6 +18,7 @@ contract InsuranceFund is Ownable {
 
     address public beneficiary;
     uint256 public distributionThreshold;
+    event VaultLiquidityProvided(uint256 requestedAmount, uint256 providedAmount);
 
     constructor(IVault vault_, IERC20 usdc_, address beneficiary_, uint256 distributionThreshold_) Ownable(msg.sender) {
         vault = vault_;
@@ -75,6 +77,18 @@ contract InsuranceFund is Ownable {
 
         vault.withdraw(amountDistributed);
         usdc.transfer(beneficiary, amountDistributed);
+    }
+
+    function provideVaultLiquidity(uint256 requestedAmount) external returns (uint256 providedAmount) {
+        if (msg.sender != address(vault)) revert UnauthorizedCaller(msg.sender);
+        if (requestedAmount == 0) return 0;
+
+        uint256 walletBalance = usdc.balanceOf(address(this));
+        providedAmount = walletBalance < requestedAmount ? walletBalance : requestedAmount;
+        if (providedAmount > 0) {
+            usdc.transfer(address(vault), providedAmount);
+        }
+        emit VaultLiquidityProvided(requestedAmount, providedAmount);
     }
 
     function _toUsdcX18(uint256 usdcRaw) internal view returns (uint256 usdcX18) {

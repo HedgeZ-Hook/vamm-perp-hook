@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
 import {IVault} from "../src/interfaces/IVault.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract OpenUserPerpPositionUnichainSepolia is Script {
@@ -45,9 +46,13 @@ contract OpenUserPerpPositionUnichainSepolia is Script {
         console2.log("===== User Perp Order Executed =====");
         console2.log("Trader:", trader);
         console2.log("Deposit amount raw:", depositAmount);
+        console2.log("Deposit amount:", FormatUtils.formatUsdcRaw(depositAmount), "USDC");
         console2.log("isBaseToQuote:", isBaseToQuote);
         console2.log("Order amount:", amount);
+        console2.log("Order amount:", FormatUtils.formatX18(amount));
         console2.log("Base delta:", base);
+        console2.log("Base delta:", FormatUtils.formatSignedX18(base));
         console2.log("Quote delta:", quote);
+        console2.log("Quote delta:", FormatUtils.formatSignedX18(quote), "vUSDC");
     }
 }

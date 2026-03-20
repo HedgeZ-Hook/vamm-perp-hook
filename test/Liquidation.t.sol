@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console2} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -27,7 +27,9 @@ import {AccountBalance} from "../src/AccountBalance.sol";
 import {ClearingHouse} from "../src/ClearingHouse.sol";
 import {Vault} from "../src/Vault.sol";
 import {FundingRate} from "../src/FundingRate.sol";
+import {Liquidator} from "../src/Liquidator.sol";
 import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
+import {ILiquidationTracker} from "../src/interfaces/ILiquidationTracker.sol";
 import {PerpMath} from "../src/libraries/PerpMath.sol";
 
 contract LiquidationTest is BaseTest {
@@ -51,6 +53,8 @@ contract LiquidationTest is BaseTest {
     MockPriceOracle internal priceOracle;
     Vault internal vault;
     FundingRate internal fundingRate;
+    Liquidator internal liquidationTrackerContract;
+    address internal trustedAggregator;
 
     PoolKey internal vammPoolKey;
     PoolKey internal spotPoolKey;
@@ -106,6 +110,7 @@ contract LiquidationTest is BaseTest {
             spotPoolKey
         );
         fundingRate = new FundingRate(poolManager, priceOracle, accountBalance, config);
+        trustedAggregator = makeAddr("trustedAggregator");
 
         hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
         hook.setVerifiedRouter(address(positionManager), true);
@@ -123,6 +128,11 @@ contract LiquidationTest is BaseTest {
         vault.setFundingRate(fundingRate);
         fundingRate.setClearingHouse(address(clearingHouse));
 
+        liquidationTrackerContract = new Liquidator(address(0), address(clearingHouse), address(this));
+        liquidationTrackerContract.setTrustedAggregator(trustedAggregator);
+        liquidationTrackerContract.setVaultContract(address(vault));
+        clearingHouse.setLiquidationTracker(ILiquidationTracker(address(liquidationTrackerContract)));
+
         veth.addWhitelist(address(clearingHouse));
         vusdc.addWhitelist(address(clearingHouse));
         veth.transfer(address(clearingHouse), 1_000_000_000e18);
@@ -134,6 +144,56 @@ contract LiquidationTest is BaseTest {
 
         _fundAndApproveUsdc(alice, 10_000_000e18);
         _fundAndApproveUsdc(bob, 10_000_000e18);
+    }
+
+    function testLiquidateLpTraderDebtIsZeroAfterCollateralLiquidation() public {
+        _depositLpCollateralAndOpenLong(alice, 2_000e18, 16_000e18);
+        priceOracle.setPriceX18(0.01e18);
+        assertTrue(vault.isLiquidatable(alice));
+
+        for (uint256 i = 0; i < 10; i++) {
+            if (!vault.isLiquidatable(alice)) break;
+            vm.prank(bob);
+            clearingHouse.liquidate(alice);
+        }
+
+        assertEq(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
+        assertEq(vault.getNetCashBalance(alice), 0);
+        assertEq(accountBalance.getOwedRealizedPnl(alice), 0);
+        assertFalse(vault.isLiquidatable(alice));
+    }
+
+    function testOnAggregatedPriceLiquidatesOneLpTraderAndLogsGas() public {
+        _depositLpCollateralAndOpenLong(alice, 2_000e18, 8_000e18);
+        priceOracle.setPriceX18(0.2e18);
+        assertTrue(vault.isLiquidatable(alice));
+
+        assertEq(liquidationTrackerContract.traderCount(), 1);
+        assertEq(liquidationTrackerContract.traders(0), alice);
+
+        uint256 snapshotId = vm.snapshotState();
+        uint256 manualGasBefore = gasleft();
+        vm.prank(bob);
+        (bool manualSuccess,) =
+            address(clearingHouse).call(abi.encodeWithSelector(ClearingHouse.liquidate.selector, alice));
+        uint256 manualGasUsed = manualGasBefore - gasleft();
+        vm.revertToState(snapshotId);
+
+        vm.recordLogs();
+        uint256 callbackGasBefore = gasleft();
+        liquidationTrackerContract.onAggregatedPrice(address(0xBEEF), trustedAggregator, 0.2e18, 1);
+        uint256 callbackGasUsed = callbackGasBefore - gasleft();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        (bool found,,) = _lastPositionLiquidated(logs);
+
+        console2.log("manualLiquidateSuccess", manualSuccess);
+        console2.log("manualLiquidateGasUsed", manualGasUsed);
+        console2.log("onAggregatedPriceGasUsed", callbackGasUsed);
+
+        assertTrue(found, "PositionLiquidated not emitted via callback flow");
+        assertLt(callbackGasUsed, 1_000_000, "callback gas exceeds 1,000,000");
+        assertTrue(vault.getNetCashBalance(alice) >= 0, "debt remains after callback liquidation");
     }
 
     function testLiquidationWithUsdcOnlyCollateral() public {
@@ -330,6 +390,50 @@ contract LiquidationTest is BaseTest {
         assertEq(accountBalance.getMarkPriceX18(vammPoolId), 0.7e18);
     }
 
+    function testLiquidateSettlesBadDebtWhenTraderHasNoPosition() public {
+        vm.prank(address(clearingHouse));
+        accountBalance.modifyOwedRealizedPnl(alice, -250e18);
+        assertTrue(vault.isLiquidatable(alice));
+        assertEq(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
+        assertEq(vault.hasLPCollateral(alice), false);
+
+        vm.prank(bob);
+        (bool isFullyLiquidated, uint256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
+
+        assertTrue(isFullyLiquidated);
+        assertEq(liquidatedSize, 0);
+        assertEq(penalty, 0);
+        assertEq(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
+        assertEq(accountBalance.getOwedRealizedPnl(alice), 0);
+        assertEq(vault.getNetCashBalance(alice), 0);
+        assertFalse(vault.isLiquidatable(alice));
+    }
+
+    function testLiquidateForceLiquidatesLpAndSettlesBadDebtWhenTraderHasNoPosition() public {
+        uint256 tokenId = _mintSpotFullRangeFor(alice, 2_000e18);
+        vm.startPrank(alice);
+        IERC721(address(positionManager)).approve(address(vault), tokenId);
+        vault.depositLP(tokenId);
+        vm.stopPrank();
+
+        vm.prank(address(clearingHouse));
+        accountBalance.modifyOwedRealizedPnl(alice, -10_000e18);
+        assertTrue(vault.isLiquidatable(alice));
+        assertTrue(vault.hasLPCollateral(alice));
+
+        vm.prank(bob);
+        (bool isFullyLiquidated, uint256 liquidatedSize, uint256 penalty) = clearingHouse.liquidate(alice);
+
+        assertTrue(isFullyLiquidated);
+        assertEq(liquidatedSize, 0);
+        assertEq(penalty, 0);
+        assertEq(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
+        assertEq(accountBalance.getOwedRealizedPnl(alice), 0);
+        assertEq(vault.getNetCashBalance(alice), 0);
+        assertFalse(vault.hasLPCollateral(alice));
+        assertFalse(vault.isLiquidatable(alice));
+    }
+
     function _allowVirtualToken(VirtualToken token) internal {
         token.addWhitelist(address(this));
         token.addWhitelist(address(poolManager));
@@ -364,6 +468,19 @@ contract LiquidationTest is BaseTest {
         usdc.approve(address(vault), type(uint256).max);
         permit2.approve(address(usdc), address(positionManager), type(uint160).max, type(uint48).max);
         permit2.approve(address(usdc), address(poolManager), type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+    }
+
+    function _depositLpCollateralAndOpenLong(address trader, uint128 lpLiquidity, uint256 openAmount) internal {
+        uint256 tokenId = _mintSpotFullRangeFor(trader, lpLiquidity);
+        vm.startPrank(trader);
+        IERC721(address(positionManager)).approve(address(vault), tokenId);
+        vault.depositLP(tokenId);
+        clearingHouse.openPosition(
+            IClearingHouse.OpenPositionParams({
+                isBaseToQuote: false, amount: openAmount, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
+            })
+        );
         vm.stopPrank();
     }
 

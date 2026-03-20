@@ -247,6 +247,23 @@ contract InsuranceFundTest is BaseTest {
         assertEq(usdc.balanceOf(address(insuranceFund)), 0);
     }
 
+    function testWithdrawAutoPullsUsdcFromInsuranceFundWhenVaultWalletIsShort() public {
+        uint256 pnlToWithdraw = 5e18;
+        vm.prank(address(clearingHouse));
+        accountBalance.modifyOwedRealizedPnl(alice, int256(pnlToWithdraw));
+
+        usdc.mint(address(insuranceFund), pnlToWithdraw);
+        assertEq(usdc.balanceOf(address(vault)), 0);
+
+        uint256 aliceWalletBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        vault.withdraw(pnlToWithdraw);
+
+        assertEq(usdc.balanceOf(alice) - aliceWalletBefore, pnlToWithdraw);
+        assertEq(usdc.balanceOf(address(insuranceFund)), 0);
+        assertEq(vault.getNetCashBalance(alice), 0);
+    }
+
     function _allowVirtualToken(VirtualToken token) internal {
         token.addWhitelist(address(this));
         token.addWhitelist(address(poolManager));

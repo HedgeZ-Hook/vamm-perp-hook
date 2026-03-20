@@ -167,6 +167,22 @@ contract ClearingHouse is Ownable, IUnlockCallback, IClearingHouse {
         if (!vault.isLiquidatable(trader)) revert NotLiquidatable(trader);
 
         _settleFunding(trader);
+        int256 positionSizeBefore = accountBalance.getTakerPositionSize(trader, vammPoolId);
+        if (positionSizeBefore == 0) {
+            int256 debtToSettle = vault.getNetCashBalance(trader);
+            if (debtToSettle < 0 && vault.hasLPCollateral(trader)) {
+                vault.forceLiquidateLP(trader, uint256(-debtToSettle));
+                debtToSettle = vault.getNetCashBalance(trader);
+            }
+            if (debtToSettle < 0) {
+                vault.settleBadDebt(trader);
+            }
+
+            _notifyLiquidationPriceChange(trader, true);
+            emit PositionLiquidated(trader, msg.sender, 0, 0, 0, true, 0);
+            return (true, 0, 0);
+        }
+
         uint256 markPriceX18 = vault.getMarkPriceX18();
         accountBalance.updateMarkPriceX18(vammPoolId, markPriceX18);
         int256 accountValue = vault.getAccountValue(trader);

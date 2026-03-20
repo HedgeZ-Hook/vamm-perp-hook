@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {InsuranceFund} from "../src/InsuranceFund.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract FundInsuranceFundUnichainSepolia is Script {
@@ -58,5 +59,6 @@ contract FundInsuranceFundUnichainSepolia is Script {
         console2.log("InsuranceFund:", address(inp.insuranceFund));
         console2.log("USDC:", address(inp.usdc));
         console2.log("Amount raw:", inp.amount);
+        console2.log("Amount:", FormatUtils.formatUsdcRaw(inp.amount), "USDC");
     }
 }

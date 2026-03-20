@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {IVault} from "../src/interfaces/IVault.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract DepositLpCollateralUnichainSepolia is Script {
@@ -32,5 +33,6 @@ contract DepositLpCollateralUnichainSepolia is Script {
         console2.log("Trader:", trader);
         console2.log("Vault:", address(vault));
         console2.log("LP tokenId:", tokenId);
+        console2.log("LP collateral value:", FormatUtils.formatX18(vault.getLPCollateralValue(trader)), "USD");
     }
 }

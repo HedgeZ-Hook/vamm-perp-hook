@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IVault} from "../src/interfaces/IVault.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract DepositVaultCollateralUnichainSepolia is Script {
@@ -31,5 +32,6 @@ contract DepositVaultCollateralUnichainSepolia is Script {
         console2.log("===== Vault Collateral Deposited =====");
         console2.log("Trader:", trader);
         console2.log("Amount raw:", amount);
+        console2.log("Amount:", FormatUtils.formatUsdcRaw(amount), "USDC");
     }
 }

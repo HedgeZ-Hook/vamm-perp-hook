@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import {Vault} from "../src/Vault.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract WithdrawVaultCollateralUnichainSepolia is Script {
@@ -63,8 +64,19 @@ contract WithdrawVaultCollateralUnichainSepolia is Script {
         console2.log("===== Vault Withdraw Done =====");
         console2.log("Trader:", inp.trader);
         console2.log("Withdraw amount raw:", withdrawableRaw);
+        console2.log("Withdraw amount:", FormatUtils.formatUsdcRaw(withdrawableRaw), "USDC");
         console2.log("Internal balance x18 before:", uint256(internalBalanceX18 > 0 ? internalBalanceX18 : int256(0)));
+        console2.log(
+            "Internal balance before:",
+            FormatUtils.formatX18(uint256(internalBalanceX18 > 0 ? internalBalanceX18 : int256(0))),
+            "USD"
+        );
         console2.log("Free collateral x18 before:", uint256(freeCollateralX18 > 0 ? freeCollateralX18 : int256(0)));
+        console2.log(
+            "Free collateral before:",
+            FormatUtils.formatX18(uint256(freeCollateralX18 > 0 ? freeCollateralX18 : int256(0))),
+            "USD"
+        );
     }
 
     function _toRawWithdrawable(int256 internalBalanceX18, int256 freeCollateralX18, uint256 scale)

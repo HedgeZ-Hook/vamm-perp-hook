@@ -3,17 +3,19 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {BaseTest} from "./utils/BaseTest.sol";
@@ -25,14 +27,14 @@ import {Config} from "../src/Config.sol";
 import {AccountBalance} from "../src/AccountBalance.sol";
 import {ClearingHouse} from "../src/ClearingHouse.sol";
 import {Vault} from "../src/Vault.sol";
-import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
 
-contract LPCollateralTest is BaseTest {
+contract LPCollateralProductionLikeTest is BaseTest {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
 
+    uint256 internal constant Q192 = 2 ** 192;
+
     address internal alice = makeAddr("alice");
-    address internal bob = makeAddr("bob");
 
     VirtualToken internal veth;
     VirtualToken internal vusdc;
@@ -46,7 +48,6 @@ contract LPCollateralTest is BaseTest {
 
     PoolKey internal vammPoolKey;
     PoolKey internal spotPoolKey;
-    PoolId internal vammPoolId;
     Currency internal baseCurrency;
     Currency internal quoteCurrency;
 
@@ -60,24 +61,22 @@ contract LPCollateralTest is BaseTest {
                 Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                     | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
                     | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-            ) ^ (0x8888 << 144)
+            ) ^ (0x9191 << 144)
         );
         deployCodeTo("PerpHook.sol:PerpHook", abi.encode(poolManager, address(this)), flags);
         hook = PerpHook(flags);
 
         veth = new VirtualToken("Virtual ETH", "vETH");
         vusdc = new VirtualToken("Virtual USDC", "vUSDC");
-        usdc = new MockERC20("USD Coin", "USDC", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
 
         veth.mintMaximumTo(address(this));
         vusdc.mintMaximumTo(address(this));
-
         _allowVirtualToken(veth);
         _allowVirtualToken(vusdc);
 
         (Currency currency0, Currency currency1) = _orderedCurrencies(address(veth), address(vusdc));
         vammPoolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(hook));
-        vammPoolId = vammPoolKey.toId();
         baseCurrency = Currency.wrap(address(veth));
         quoteCurrency = Currency.wrap(address(vusdc));
 
@@ -88,7 +87,7 @@ contract LPCollateralTest is BaseTest {
         config = new Config();
         accountBalance = new AccountBalance(config);
         clearingHouse = new ClearingHouse(poolManager, accountBalance, config, vammPoolKey, baseCurrency, quoteCurrency);
-        priceOracle = new MockPriceOracle(1e18);
+        priceOracle = new MockPriceOracle(2_300e18);
         vault = new Vault(
             accountBalance,
             config,
@@ -101,14 +100,13 @@ contract LPCollateralTest is BaseTest {
         );
 
         hook.registerVAMMPool(vammPoolKey, address(veth), address(vusdc));
+        hook.registerSpotPool(spotPoolKey);
         hook.setVerifiedRouter(address(positionManager), true);
         hook.setVerifiedRouter(address(swapRouter), true);
-        hook.registerSpotPool(spotPoolKey);
         hook.setClearingHouse(address(clearingHouse));
 
         accountBalance.setClearingHouse(address(clearingHouse));
         accountBalance.setVault(address(vault));
-
         clearingHouse.setVault(vault);
         vault.setClearingHouse(address(clearingHouse));
         vault.setInsuranceFund(makeAddr("insuranceFund"));
@@ -118,149 +116,36 @@ contract LPCollateralTest is BaseTest {
         veth.transfer(address(clearingHouse), 1_000_000_000e18);
         vusdc.transfer(address(clearingHouse), 1_000_000_000e18);
 
-        poolManager.initialize(vammPoolKey, Constants.SQRT_PRICE_1_1);
-        poolManager.initialize(spotPoolKey, Constants.SQRT_PRICE_1_1);
+        poolManager.initialize(vammPoolKey, _vammInitSqrtPriceX96(2_300e18));
+        poolManager.initialize(spotPoolKey, _priceX18ToSqrtPriceX96(2_300e18, 18, 6));
         _mintVammFullRange(vammPoolKey, 1_000_000e18);
 
-        _fundAndApproveUsdc(alice, 10_000_000e18);
-        _fundAndApproveUsdc(bob, 10_000_000e18);
-
-        aliceSpotTokenId = _mintSpotFullRangeFor(alice, 2_000e18);
+        _fundAndApproveUsdc(alice, 10_000_000e6);
+        aliceSpotTokenId = _mintSpotFullRangeFor(alice, 4_795_831_523_312);
     }
 
-    function testDepositLPAsCollateral() public {
+    function testWithdrawLPWithNegativeNetCashReturnsEthWhenUsdcLegAlreadyCoversDebt_USDC6_2300() public {
         vm.prank(alice);
         IERC721(address(positionManager)).approve(address(vault), aliceSpotTokenId);
-
         vm.prank(alice);
         vault.depositLP(aliceSpotTokenId);
 
-        assertEq(IERC721(address(positionManager)).ownerOf(aliceSpotTokenId), address(vault));
-        (uint256 tokenId, address owner,,,) = vault.lpCollaterals(aliceSpotTokenId);
-        assertEq(tokenId, aliceSpotTokenId);
-        assertEq(owner, alice);
-        assertEq(vault.getUserLPTokenIds(alice).length, 1);
-        assertGt(vault.getLPCollateralValue(alice), 0);
-        assertEq(vault.getAccountValue(alice), int256(vault.getLPCollateralValue(alice)));
-    }
-
-    function testLpCollateralEnablesPerpTrading() public {
-        _depositAliceLP();
-
-        vm.prank(alice);
-        clearingHouse.openPosition(
-            IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false, amount: 2_000e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
-            })
-        );
-
-        assertGt(accountBalance.getTakerPositionSize(alice, vammPoolId), 0);
-
-        vm.expectRevert();
-        vm.prank(alice);
-        clearingHouse.openPosition(
-            IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false, amount: 80_000e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
-            })
-        );
-    }
-
-    function testVoluntaryWithdrawBlockedByMarginAndPartialDecreaseWorks() public {
-        _depositAliceLP();
-
-        vm.prank(alice);
-        clearingHouse.openPosition(
-            IClearingHouse.OpenPositionParams({
-                isBaseToQuote: false, amount: 20_000e18, sqrtPriceLimitX96: 0, hookData: Constants.ZERO_BYTES
-            })
-        );
-
-        vm.expectRevert();
-        vm.prank(alice);
-        vault.withdrawLP(aliceSpotTokenId);
-
-        (,,,, uint128 liquidityBefore) = vault.lpCollaterals(aliceSpotTokenId);
-        uint128 removeLiquidity = liquidityBefore / 3;
-        vm.prank(alice);
-        vault.decreaseLP(aliceSpotTokenId, removeLiquidity);
-        (,,,, uint128 liquidityAfter) = vault.lpCollaterals(aliceSpotTokenId);
-        assertEq(liquidityAfter, liquidityBefore - removeLiquidity);
-    }
-
-    function testVoluntaryWithdrawWithDebtRepaymentWaterfall() public {
-        _depositAliceLP();
-
-        vm.prank(alice);
-        vault.deposit(200e18);
-
         vm.prank(address(clearingHouse));
-        accountBalance.modifyOwedRealizedPnl(alice, -1_500e18);
+        accountBalance.modifyOwedRealizedPnl(alice, -40e18);
 
-        uint256 usdcBefore = usdc.balanceOf(alice);
         uint256 ethBefore = alice.balance;
+        uint256 usdcBefore = usdc.balanceOf(alice);
+
         vm.prank(alice);
         (uint256 ethReturned, uint256 usdcReturned) = vault.withdrawLP(aliceSpotTokenId);
 
         assertEq(IERC721(address(positionManager)).ownerOf(aliceSpotTokenId), alice);
         assertGe(vault.getNetCashBalance(alice), 0);
-        assertGt(usdc.balanceOf(alice), usdcBefore);
         assertGt(ethReturned, 0);
-        assertEq(usdc.balanceOf(alice) - usdcBefore, usdcReturned);
+        assertGt(usdcReturned, 0);
         assertEq(alice.balance - ethBefore, ethReturned);
-    }
-
-    function testVoluntaryWithdrawRevertsWhenForcedSwapOutputFallsBelowMinOut() public {
-        _depositAliceLP();
-        _mintSpotFullRangeFor(bob, 1_000e18);
-
-        vm.prank(address(clearingHouse));
-        accountBalance.modifyOwedRealizedPnl(alice, -10_000e18);
-
-        // Force a strict min-out based on oracle, then set oracle far above spot to trigger slippage revert.
-        vault.setForcedSwapSlippageRatio(0);
-        priceOracle.setPriceX18(100e18);
-
-        vm.expectRevert();
-        vm.prank(alice);
-        vault.withdrawLP(aliceSpotTokenId);
-    }
-
-    function testPartialDecreaseUpdatesLiquidity() public {
-        _depositAliceLP();
-
-        (,,,, uint128 liquidityBefore) = vault.lpCollaterals(aliceSpotTokenId);
-        uint128 removeLiquidity = (liquidityBefore * 4) / 10;
-
-        vm.prank(alice);
-        vault.decreaseLP(aliceSpotTokenId, removeLiquidity);
-
-        (,,,, uint128 liquidityAfter) = vault.lpCollaterals(aliceSpotTokenId);
-        assertEq(liquidityAfter, liquidityBefore - removeLiquidity);
-    }
-
-    function testLpValueChangesWithOraclePrice() public {
-        _depositAliceLP();
-
-        uint256 valueAt1 = vault.getLPCollateralValue(alice);
-        priceOracle.setPriceX18(2e18);
-        uint256 valueAt2 = vault.getLPCollateralValue(alice);
-
-        assertGt(valueAt2, valueAt1);
-    }
-
-    function testCannotWithdrawSomeoneElseLP() public {
-        _depositAliceLP();
-
-        vm.expectRevert();
-        vm.prank(bob);
-        vault.withdrawLP(aliceSpotTokenId);
-    }
-
-    function _depositAliceLP() internal {
-        vm.prank(alice);
-        IERC721(address(positionManager)).approve(address(vault), aliceSpotTokenId);
-        vm.prank(alice);
-        vault.depositLP(aliceSpotTokenId);
+        assertEq(usdc.balanceOf(alice) - usdcBefore, usdcReturned);
+        assertEq(address(vault).balance, 0);
     }
 
     function _allowVirtualToken(VirtualToken token) internal {
@@ -304,7 +189,7 @@ contract LPCollateralTest is BaseTest {
         int24 tickLower = TickMath.minUsableTick(key.tickSpacing);
         int24 tickUpper = TickMath.maxUsableTick(key.tickSpacing);
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1,
+            _vammInitSqrtPriceX96(2_300e18),
             TickMath.getSqrtPriceAtTick(tickLower),
             TickMath.getSqrtPriceAtTick(tickUpper),
             liquidityAmount
@@ -326,8 +211,9 @@ contract LPCollateralTest is BaseTest {
     function _mintSpotFullRangeFor(address owner, uint128 liquidityAmount) internal returns (uint256 tokenId) {
         int24 tickLower = TickMath.minUsableTick(spotPoolKey.tickSpacing);
         int24 tickUpper = TickMath.maxUsableTick(spotPoolKey.tickSpacing);
+        uint160 sqrtPriceX96 = _priceX18ToSqrtPriceX96(2_300e18, 18, 6);
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            Constants.SQRT_PRICE_1_1,
+            sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickLower),
             TickMath.getSqrtPriceAtTick(tickUpper),
             liquidityAmount
@@ -346,5 +232,21 @@ contract LPCollateralTest is BaseTest {
             Constants.ZERO_BYTES
         );
         vm.stopPrank();
+    }
+
+    function _vammInitSqrtPriceX96(uint256 quotePerBaseX18) internal view returns (uint160) {
+        uint256 rawPriceX18 =
+            Currency.unwrap(vammPoolKey.currency0) == address(veth) ? quotePerBaseX18 : 1e36 / quotePerBaseX18;
+        return _priceX18ToSqrtPriceX96(rawPriceX18, 18, 18);
+    }
+
+    function _priceX18ToSqrtPriceX96(uint256 priceX18, uint8 baseDecimals, uint8 quoteDecimals)
+        internal
+        pure
+        returns (uint160 sqrtPriceX96)
+    {
+        uint256 rawPriceX18 = FullMath.mulDiv(priceX18, 10 ** quoteDecimals, 10 ** baseDecimals);
+        uint256 ratioX192 = FullMath.mulDiv(rawPriceX18, Q192, 1e18);
+        sqrtPriceX96 = uint160(Math.sqrt(ratioX192));
     }
 }

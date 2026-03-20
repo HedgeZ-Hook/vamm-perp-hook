@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Script, console2} from "forge-std/Script.sol";
 
 import {IClearingHouse} from "../src/interfaces/IClearingHouse.sol";
+import {FormatUtils} from "./base/FormatUtils.sol";
 import {UnichainSepoliaConstants} from "./base/UnichainSepoliaConstants.sol";
 
 contract ClosePerpPositionUnichainSepolia is Script {
@@ -27,7 +28,10 @@ contract ClosePerpPositionUnichainSepolia is Script {
         console2.log("===== Perp Position Closed =====");
         console2.log("Trader:", trader);
         console2.log("Close amount:", closeAmount);
+        console2.log("Close amount:", FormatUtils.formatX18(closeAmount));
         console2.log("Base delta:", base);
+        console2.log("Base delta:", FormatUtils.formatSignedX18(base));
         console2.log("Quote delta:", quote);
+        console2.log("Quote delta:", FormatUtils.formatSignedX18(quote), "vUSDC");
     }
 }

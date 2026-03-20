@@ -29,6 +29,10 @@ interface IClearingHouseLiquidationSync {
     function syncTraderLiquidationPrice(address trader, uint256 liquidationPriceX18, bool wasLiquidated) external;
 }
 
+interface IInsuranceFundLiquidity {
+    function provideVaultLiquidity(uint256 requestedAmount) external returns (uint256 providedAmount);
+}
+
 contract Vault is Ownable, IVault {
     using PoolIdLibrary for PoolKey;
     using PositionInfoLibrary for PositionInfo;
@@ -44,6 +48,7 @@ contract Vault is Ownable, IVault {
     error InsufficientInternalBalance(address trader, int256 balance, uint256 requestedAmount);
     error InvalidForcedSwapSlippageRatio(uint24 ratio);
     error UnsupportedUsdcDecimals(uint8 decimals);
+    error InsufficientVaultLiquidity(uint256 required, uint256 available);
 
     struct LPCollateral {
         uint256 tokenId;
@@ -159,6 +164,7 @@ contract Vault is Ownable, IVault {
             revert InsufficientInternalBalance(msg.sender, usdcBalance[msg.sender], amountX18);
         }
         usdcBalance[msg.sender] -= int256(amountX18);
+        _ensureVaultUsdcLiquidity(amount);
         usdc.transfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);
         _emitLiquidationPriceChange(msg.sender, false);
@@ -489,8 +495,10 @@ contract Vault is Ownable, IVault {
         if (netCashBalance < 0) {
             uint256 usdcDebt = uint256(-netCashBalance);
             uint256 usdcFromSwap;
+            uint256 ethRemaining = ethAmount;
             if (usdcAmountX18 < usdcDebt) {
                 usdcFromSwap = _swapETHtoUSDC(ethAmount, usdcDebt - usdcAmountX18, true);
+                ethRemaining = 0;
             }
             uint256 totalUsdcX18 = usdcAmountX18 + usdcFromSwap;
 
@@ -504,7 +512,10 @@ contract Vault is Ownable, IVault {
             if (surplusRaw > 0) {
                 usdc.transfer(trader, surplusRaw);
             }
-            return (0, surplusRaw);
+            if (ethRemaining > 0) {
+                _transferNative(trader, ethRemaining);
+            }
+            return (ethRemaining, surplusRaw);
         }
 
         if (ethAmount > 0) _transferNative(trader, ethAmount);
@@ -543,6 +554,19 @@ contract Vault is Ownable, IVault {
     function _settleOwedRealizedPnl(address trader) internal {
         int256 pnl = accountBalance.settleOwedRealizedPnl(trader);
         usdcBalance[trader] += pnl;
+    }
+
+    function _ensureVaultUsdcLiquidity(uint256 requiredRawAmount) internal {
+        uint256 availableRaw = usdc.balanceOf(address(this));
+        if (availableRaw >= requiredRawAmount) return;
+
+        uint256 shortfall = requiredRawAmount - availableRaw;
+        if (insuranceFund != address(0)) {
+            try IInsuranceFundLiquidity(insuranceFund).provideVaultLiquidity(shortfall) {} catch {}
+            availableRaw = usdc.balanceOf(address(this));
+        }
+
+        if (availableRaw < requiredRawAmount) revert InsufficientVaultLiquidity(requiredRawAmount, availableRaw);
     }
 
     function _getSpotSqrtPriceX96() internal view returns (uint160 sqrtPriceX96) {
