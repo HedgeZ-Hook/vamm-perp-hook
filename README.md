@@ -5,6 +5,7 @@
 ### Live Deployment (Unichain Sepolia)
 
 > Network: `Unichain Sepolia` (chainId `1301`)
+> Status: **Tested on testnet**
 
 | Component | Address |
 |---|---|
@@ -25,6 +26,17 @@
 | InsuranceFund | `0xeD4B294A6111E5b8194E42660264BCcF8A79708A` |
 | PriceOracle | `0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be` |
 | LiquidationTracker | `0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be` |
+
+### Links
+
+- Deployment explorer (Unichain Sepolia): `https://sepolia.uniscan.xyz/`
+- PerpHook: `https://sepolia.uniscan.xyz/address/0x0b4137B66Ff5802A08Bf238E6606E658c1eA8FC0`
+- ClearingHouse: `https://sepolia.uniscan.xyz/address/0x0397eEA5b5eD85290A94f6470213295077ED1DbB`
+- Vault: `https://sepolia.uniscan.xyz/address/0x153D1E965a5f58cEFa5C27650eB1D411C51146D0`
+- LiquidityController: `https://sepolia.uniscan.xyz/address/0x95159919aB89b6F82F665ade6bAB77f9Bd7D9265`
+- InsuranceFund: `https://sepolia.uniscan.xyz/address/0xeD4B294A6111E5b8194E42660264BCcF8A79708A`
+- Reactive Aggregator: `https://lasna.reactscan.net/address/0x2d993f6ea7c3e49cb9cf3e31d9c11f98a75e0b68/contract/0x0570bcf5d59a85889700673483fe4c116b6dbb59?screen=transactions`
+- Full demo video: `https://www.youtube.com/watch?v=3dFZhN6Lqds`
 
 ### Minimal Repro Flow (for judges)
 
